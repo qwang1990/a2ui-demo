@@ -1,0 +1,44 @@
+{
+  "aip_logic": {
+    "id": "simple_kyc",
+    "entry": "collect_basic"
+  },
+  "objectTypes": [
+    {
+      "apiName": "ApplicantUser",
+      "displayName": "申请人",
+      "properties": [
+        {
+          "apiName": "fullName",
+          "type": "string",
+          "displayName": "姓名",
+          "required": true,
+          "fieldSource": "user_input"
+        },
+        {
+          "apiName": "idNumber",
+          "type": "string",
+          "displayName": "身份证号",
+          "required": true,
+          "fieldSource": "user_input"
+        }
+      ]
+    }
+  ],
+  "nodes": [
+    {
+      "id": "collect_basic",
+      "kind": "collect",
+      "title": "请补全 KYC 信息",
+      "objectTypeApiName": "ApplicantUser",
+      "propertyApiNames": ["fullName", "idNumber"],
+      "next": "terminal_ok"
+    },
+    {
+      "id": "terminal_ok",
+      "kind": "terminal",
+      "outcome": "approved",
+      "message": "信息已采集"
+    }
+  ]
+}

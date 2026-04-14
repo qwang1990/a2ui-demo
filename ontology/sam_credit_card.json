@@ -1,0 +1,92 @@
+{
+  "aip_logic": {
+    "id": "sam_credit_card",
+    "entry": "check_sams_member"
+  },
+  "objectTypes": [
+    {
+      "apiName": "ApplicantUser",
+      "displayName": "申请人（用户）",
+      "description": "信用卡开卡场景下的自然人主体",
+      "properties": [
+        {
+          "apiName": "fullName",
+          "type": "string",
+          "displayName": "姓名",
+          "required": true,
+          "fieldSource": "user_input"
+        },
+        {
+          "apiName": "idNumber",
+          "type": "string",
+          "displayName": "身份证号",
+          "required": true,
+          "fieldSource": "user_input"
+        },
+        {
+          "apiName": "phone",
+          "type": "string",
+          "displayName": "手机号",
+          "required": false,
+          "fieldSource": "user_input"
+        },
+        {
+          "apiName": "address",
+          "type": "string",
+          "displayName": "家庭住址",
+          "required": false,
+          "fieldSource": "user_input"
+        }
+      ]
+    }
+  ],
+  "nodes": [
+    {
+      "id": "check_sams_member",
+      "kind": "logic",
+      "predicate": "is_sams_member",
+      "edges": { "true": "terminal_denied", "false": "collect_basic" }
+    },
+    {
+      "id": "collect_basic",
+      "kind": "collect",
+      "title": "请填写三要素（姓名、身份证、手机号）",
+      "objectTypeApiName": "ApplicantUser",
+      "propertyApiNames": ["fullName", "idNumber", "phone"],
+      "next": "check_ms_card"
+    },
+    {
+      "id": "check_ms_card",
+      "kind": "logic",
+      "predicate": "has_ms_credit_card",
+      "edges": { "true": "terminal_denied", "false": "collect_detail" }
+    },
+    {
+      "id": "collect_detail",
+      "kind": "collect",
+      "title": "请填写详细信息",
+      "objectTypeApiName": "ApplicantUser",
+      "propertyApiNames": ["address"],
+      "next": "face_verify"
+    },
+    {
+      "id": "face_verify",
+      "kind": "action",
+      "title": "人脸识别核验",
+      "action_name": "face_verify",
+      "next": "terminal_approved"
+    },
+    {
+      "id": "terminal_denied",
+      "kind": "terminal",
+      "outcome": "denied",
+      "message": "不予开卡"
+    },
+    {
+      "id": "terminal_approved",
+      "kind": "terminal",
+      "outcome": "approved",
+      "message": "提交验证"
+    }
+  ]
+}
