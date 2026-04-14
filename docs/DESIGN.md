@@ -34,7 +34,7 @@ flowchart TB
   subgraph application [应用层]
     ORCH[WS_编排_start_resume_event]
     REG[FlowRegistry_编译结果缓存]
-    HOT[watchdog_热加载]
+    HOT[HTTP_PUT_手动保存本体]
   end
   subgraph domain [领域层]
     SPEC[OntologySpec_Pydantic]
@@ -132,16 +132,20 @@ sequenceDiagram
 
 | 概念 | JSON 位置 | 主要字段 |
 |------|-----------|----------|
+| 版本 | 顶层 | `ontologyVersion` |
+| Logic 定义（可复用） | `logicDefinitions[]` | `apiName`, `displayName`, `description`, `implementation`（`type: mock_user_flags` + `flagKey`） |
+| Action 定义 | `actionDefinitions[]` | `apiName`, `displayName`, `description`, `implementationKey` |
 | Object Type | `objectTypes[]` | `apiName`, `displayName`, `description?` |
-| Property | `objectTypes[].properties[]` | `apiName`, `type`（`string` / `boolean` / …）, `displayName`, `required`, `fieldSource`（`user_input` \| `ontology_api`） |
-| AIP Logic | `aip_logic` | `id`, `entry` |
-| Logic 节点 | `nodes[]` | `predicate`, `edges` |
+| Property | `objectTypes[].properties[]` | `apiName`, `type`, `displayName`, `required`, `fieldSource`（当前以 `user_input` 为主） |
+| AIP Logic | `aip_logic` | `id`, `entry`, `inputs[]`（可选：`attributeApiName` / `required` / `description`） |
+| Logic 节点 | `nodes[]` | `logicRef`（指向 `logicDefinitions`）、`edges` |
 | Collect 节点 | `nodes[]` | `objectTypeApiName`, `propertyApiNames`, `next` |
-| Action / Terminal | `nodes[]` | 与原先一致 |
+| Action 节点 | `nodes[]` | `actionRef`（指向 `actionDefinitions`）、`next` |
+| Terminal | `nodes[]` | `outcome`, `message` |
 
-**运行时 `attrs`**：以各 Property 的 **`apiName`（camelCase）** 为键，例如 `fullName`、`idNumber`。逻辑节点拉取 Mock 标志时使用 `attrs["idNumber"]` 作为 URL 参数调用 `GET /api/mock-ontology/user/{idNumber}`。
+**运行时 `attrs`**：以各 Property 的 **`apiName`（camelCase）** 为键，例如 `fullName`、`idNumber`。逻辑节点拉取 Mock 标志时使用 `attrs["idNumber"]` 作为 URL 参数调用 `GET /api/mock-ontology/user/{idNumber}`；具体取哪个布尔字段由 `logicDefinitions[].implementation.flagKey` 决定。
 
-**说明**：`fieldSource` 为后续「只读平台属性 vs 用户输入」扩展预留；当前编译路径仍以 HTTP Mock 返回 `is_sams_member` / `has_ms_credit_card` 为主。
+**说明**：`fieldSource` 可为后续扩展预留；当前 **collect** 负责用户输入，**logic** 仅在 `logic` 节点内按需调 Mock，不在此做独立「属性解析器」。
 
 **本体 JSON 与图状态的关系**：
 
@@ -185,11 +189,13 @@ flowchart TD
 
 配置文件：[../ontology/sam_credit_card.json](../ontology/sam_credit_card.json)。
 
-### 3.3 热加载语义
+### 3.3 本体加载与手动更新
 
-- **监视目录**：默认仓库根下 [`ontology/`](../ontology/)，可通过环境变量 `ONTOLOGY_DIR` 覆盖（见 [`config.py`](../backend/src/a2ui_demo/config.py)）。
-- **行为**：`*.json` 变更时重新 `model_validate` + `compile_flow`，更新 `FlowRegistry` 中对应 `aip_logic.id` 的编译结果。
-- **会话策略**：已建立的 LangGraph `thread_id` 不迁移到新图；**新** `start_flow` 使用最新编译图。测试环境可设 `DISABLE_ONTOLOGY_WATCHER=1` 关闭监视（见 [`conftest.py`](../backend/tests/conftest.py)）。
+- **目录**：默认仓库根下 [`ontology/`](../ontology/)，可通过环境变量 `ONTOLOGY_DIR` 覆盖（见 [`config.py`](../backend/src/a2ui_demo/config.py)）。启动时加载 `*.json` 到 `FlowRegistry`。
+- **手动更新**：不再使用文件监视器。通过 REST API：`POST /api/ontology/validate`（校验 JSON + 语义）、`GET /api/ontology/{flow_id}`（读取 `{flow_id}.json`）、`PUT /api/ontology/{flow_id}`（校验通过后落盘并重新 `compile_flow` + `register`）。前端「开始办理」页提供「校验 / 保存并应用」按钮。
+- **失败回显**：校验失败时返回结构化 `errors[]`（`path` + `message`），不落盘。
+- **会话策略**：已建立的 LangGraph `thread_id` 不迁移到新图；**新** `start_flow` 使用最新编译图。
+- **`start_flow` 入参**：若 `aip_logic.inputs` 声明了必填属性，缺省则 WebSocket 返回 `type: error` 与 `errors`（不启动图）。
 
 ---
 
@@ -205,8 +211,8 @@ flowchart TD
 
 | kind | 行为 |
 |------|------|
-| logic | 调 `OntologyPlatformClient.fetch_user_flags`，写 `_branch`，`add_conditional_edges` 映射到下一节点。 |
-| collect | 对 `propertyApiNames` 检查 `attrs`；缺失则 `interrupt({ kind: user_input, ... })`，恢复时合并 `resume` 中的 `attrs`。 |
+| logic | 按 `logicRef` 查 `logicDefinitions`；`implementation.requestPathTemplate` 中 `{attrApiName}` 从 `attrs` 替换后 `GET`，再用 `flagKey` 读响应布尔值；写 `_branch`，`add_conditional_edges` 映射到下一节点。 |
+| collect | 对节点 `propertyApiNames` 检查 `attrs` 是否仍缺；`interrupt` 里 **`property_api_names` 为该 objectType 在本体中的全部属性顺序**（用于展示已收集项），**`collect_field_names`** 与节点 `propertyApiNames` 一致（本步仍要采集的键），**`missing`** 为后者中仍空的字段。LLM 提示词与 schema 补全均以此区分「整对象展示」与「本步缺啥」。 |
 | action | `interrupt({ kind: action, ... })`，恢复时认 `confirmed: true`。 |
 | terminal | 写入 `outcome` / `terminal_message`，边连 `END`。 |
 
@@ -259,7 +265,7 @@ flowchart LR
 |------|------|
 | `flow_progress` | 当前节点（暂停时优先展示 interrupt 中的 `node_id`） |
 | `a2ui_batch` | A2UI 消息数组 |
-| `flow_done` | `outcome` + `message` |
+| `flow_done` | `outcome` + `message` + `attrs` + **`a2ui_messages`**（结束摘要，标签与字段顺序来自本体 `objectTypes`）+ `surface_id` |
 | `error` | 错误说明 |
 
 实现见 [`main.py`](../backend/src/a2ui_demo/main.py)。
@@ -343,6 +349,7 @@ flowchart LR
 | **design-002** | 合并原 `DESIGN-002.md`：OpenRouter 可配置化（`BASE_URL` / Referer / Title）、全链路日志与脱敏、Foundry 风格 `objectTypes`/`properties` 与 camelCase `attrs`。本文档取代根目录分散的多份设计文件。 |
 | **design-003** | LangGraph 编译图 / `stream` 逐步日志 / `graph final_state`；INFO 下 `langgraph_edges_preview` 与 `nodes`；前端 `SignalWatcher` + `keyed` 重建 `a2ui-surface`；`format_compiled_graph` 单测。 |
 | **design-004** | 前端改为“固定首表单 + 对话时间线 + 动态A2UI卡片”；默认隐藏调试信息（仅开发态可展开）；补充 `messages_source` 语义。 |
+| **design-005** | 新增“今日设计复盘”章节：主流程总览图、运行时时序图、五点结论落地与下一步建议。 |
 
 ---
 
@@ -350,3 +357,69 @@ flowchart LR
 
 - 单元测试：`cd backend && uv run pytest`（含 `test_logging_utils`、`compiler`/`loader` 与 Foundry JSON）。
 - 手工：后端 + 前端联调；`LOG_LEVEL=DEBUG` 可看到更细图与 LLM metadata（密钥仍不落日志）。
+
+---
+
+## 11. 今日设计复盘（design-005）
+
+### 11.1 主流程总览（图文并茂）
+
+```mermaid
+flowchart LR
+  O[本体配置<br/>object_属性_约束] --> LG[LangGraph启动加载本体]
+  LG --> LD[Loader同步读取本体元信息]
+  LD --> RT[运行时推进<br/>用户输入 + 接口调用]
+  RT --> ST[状态持续富集<br/>直到终态]
+  ST --> UI[A2UI自动渲染<br/>信息补充 + 结果展示]
+  O --> CFG[在线编辑_保存_验证]
+  CFG --> HOT[热加载生效]
+  HOT --> LG
+```
+
+本次设计形成了一个完整闭环：**本体定义流程语义，LangGraph 驱动执行推进，A2UI 承载交互与结果展示，本体配置可在线修改并热加载回流运行时**。
+
+### 11.2 运行时时序（图文并茂）
+
+```mermaid
+sequenceDiagram
+  participant U as 用户
+  participant FE as 前端_A2UI
+  participant BE as 后端编排
+  participant G as LangGraph
+  participant API as 外部接口_本体服务
+  participant ON as 本体配置
+
+  ON->>BE: 加载object_属性_logic定义
+  BE->>G: compile_flow并注册
+  U->>FE: 输入信息_触发动作
+  FE->>BE: start_flow_or_a2ui_event
+  BE->>G: invoke_or_resume
+  loop 直到结束
+    G->>API: 调用逻辑接口获取补充信息
+    API-->>G: 返回业务标志或数据
+    alt 需要继续补充用户信息
+      G-->>BE: interrupt_collect_or_action
+      BE-->>FE: a2ui_batch自动渲染下一步
+      U->>FE: 继续输入或确认
+      FE->>BE: a2ui_event_resume
+      BE->>G: Command_resume
+    else 满足终态条件
+      G-->>BE: outcome_terminal_message
+      BE-->>FE: flow_done_含结果摘要
+    end
+  end
+```
+
+### 11.3 五点结论落地
+
+1. **本体设计已完成**：AIP logic 当前直接采用 LangGraph 结构承载，后续仅需增加「本体语义到图节点」转换层，不影响主流程推进模型。  
+2. **加载链路清晰**：LangGraph 启动时加载本体，`loader` 同步获取 object/属性等元信息，保障配置语义与执行语义一致。  
+3. **状态驱动推进**：用户输入与接口调用共同 enrich `attrs`，图按中断/恢复机制持续前进直至 terminal。  
+4. **配置可运维**：本体文件支持在线编辑、保存、校验与热加载，支持不重启迭代流程定义。  
+5. **UI 零改动渲染**：信息补充与结果页通过 A2UI 自动渲染，流程变更主要落在本体配置和后端编排，不依赖前端代码改动。  
+
+### 11.4 下一步建议
+
+- 增加「本体结构 → LangGraph」标准映射规范，降低后续多流程扩展成本。  
+- 强化热加载一致性保护（版本号、失败回滚、会话切换策略说明）。  
+- 补充端到端回归用例，覆盖 `start_flow -> interrupt/resume -> flow_done` 主链路与失败分支。

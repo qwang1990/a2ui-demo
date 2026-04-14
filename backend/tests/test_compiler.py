@@ -31,12 +31,17 @@ class FakeOntologyClient(OntologyPlatformClient):
     def __init__(self) -> None:
         super().__init__("http://unused")
 
-    def fetch_user_flags(self, id_number: str) -> dict[str, bool]:
-        u = id_number.upper()
-        return {
-            "is_sams_member": "SAMS_MEMBER" in u,
-            "has_ms_credit_card": "HAS_MS" in u,
-        }
+    def get_json(self, path: str) -> dict[str, bool]:
+        if "/api/mock-ontology/user/" in path:
+            from urllib.parse import unquote
+
+            tail = path.split("/api/mock-ontology/user/", 1)[1].split("?")[0]
+            u = unquote(tail).upper()
+            return {
+                "is_sams_member": "SAMS_MEMBER" in u,
+                "has_ms_credit_card": "HAS_MS" in u,
+            }
+        return {}
 
 
 @pytest.mark.asyncio

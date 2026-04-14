@@ -1,7 +1,14 @@
 {
+  "ontologyVersion": 1,
+  "logicDefinitions": [],
+  "actionDefinitions": [],
   "aip_logic": {
     "id": "simple_kyc",
-    "entry": "collect_basic"
+    "entry": "collect_basic",
+    "inputs": [
+      { "attributeApiName": "fullName", "required": true, "description": "姓名" },
+      { "attributeApiName": "idNumber", "required": true, "description": "身份证号" }
+    ]
   },
   "objectTypes": [
     {

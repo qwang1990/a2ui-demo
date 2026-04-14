@@ -11,8 +11,17 @@ class FakeOntologyClient(OntologyPlatformClient):
     def __init__(self) -> None:
         super().__init__("http://unused")
 
-    def fetch_user_flags(self, id_number: str) -> dict[str, bool]:
-        return {"is_sams_member": False, "has_ms_credit_card": False}
+    def get_json(self, path: str) -> dict[str, bool]:
+        if "/api/mock-ontology/user/" in path:
+            from urllib.parse import unquote
+
+            tail = path.split("/api/mock-ontology/user/", 1)[1].split("?")[0]
+            u = unquote(tail).upper()
+            return {
+                "is_sams_member": "SAMS_MEMBER" in u,
+                "has_ms_credit_card": "HAS_MS" in u,
+            }
+        return {}
 
 
 def test_load_all_json(tmp_path: Path) -> None:
@@ -30,7 +39,10 @@ def test_registry_reload_single_file(tmp_path: Path) -> None:
     p.write_text(
         json.dumps(
             {
-                "aip_logic": {"id": "hot_reload_x", "entry": "t"},
+                "ontologyVersion": 1,
+                "logicDefinitions": [],
+                "actionDefinitions": [],
+                "aip_logic": {"id": "hot_reload_x", "entry": "t", "inputs": []},
                 "objectTypes": [
                     {
                         "apiName": "EmptyType",

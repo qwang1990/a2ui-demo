@@ -39,7 +39,7 @@ def _union_system_prompt() -> str:
         '{"id":"title_txt","component":{"Text":{"text":{"literalString":"补充信息"},"usageHint":"h2"}}},'
         '{"id":"field_phone","component":{"TextField":'
         '{"label":{"literalString":"手机号"},"text":{"path":"/user/phone"},"textFieldType":"shortText"}}},'
-        '{"id":"submit_lbl","component":{"Text":{"text":{"literalString":"提交"},"usageHint":"body"}}},'
+        '{"id":"submit_lbl","component":{"Text":{"text":{"literalString":"提交"},"usageHint":"h3"}}},'
         '{"id":"submit_btn","component":{"Button":'
         '{"child":"submit_lbl","action":{"name":"submit_collect","context":['
         '{"key":"phone","value":{"path":"/user/phone"}}]}}}},'
@@ -107,6 +107,8 @@ async def maybe_user_input_ui_bundle(
         return None, None, None, "llm_client_unavailable"
 
     missing = list(interrupt_payload.get("missing") or [])
+    collect_field_names = list(interrupt_payload.get("collect_field_names") or missing)
+    display = list(interrupt_payload.get("property_api_names") or missing)
     labels = dict(interrupt_payload.get("labels") or {})
     attrs = sanitize_attrs_for_log(dict(interrupt_payload.get("attrs") or {}))
     title = str(interrupt_payload.get("title") or "请补全信息")
@@ -118,8 +120,11 @@ async def maybe_user_input_ui_bundle(
         content=(
             f"outputKind 优先选 a2uiV08Messages。\n"
             f"node_id={node_id}; objectTypeApiName={object_type}; title={title}; "
-            f"missing={missing}; labels={labels}; attrs_sanitized={attrs}。\n"
-            "若输出 a2uiV08Messages: surfaceId 默认用 main；root 必须指向已声明的组件 id。"
+            f"collect_field_names={collect_field_names}; missing={missing}; "
+            f"property_api_names(本体展示顺序)={display}; labels={labels}; attrs_sanitized={attrs}。\n"
+            "若输出 a2uiV08Messages：须覆盖 property_api_names 中每个属性；"
+            "missing 中的用 TextField；其余用 Text 只读展示已填信息。"
+            "surfaceId 默认 main；root 必须指向已声明的组件 id。"
         )
     )
     t0 = time.perf_counter()

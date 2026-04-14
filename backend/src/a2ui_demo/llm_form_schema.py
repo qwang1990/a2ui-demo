@@ -76,6 +76,38 @@ def _client() -> ChatOpenAI | None:
     return get_openrouter_client()
 
 
+def enrich_collect_schema_display_fields(
+    schema: dict[str, Any],
+    interrupt_payload: dict[str, Any],
+) -> dict[str, Any]:
+    """LLM 若漏字段，按本体展示顺序补全，避免 collect_detail 只出现 address。"""
+    display = list(interrupt_payload.get("property_api_names") or [])
+    if not display:
+        return schema
+    missing = set(interrupt_payload.get("missing") or [])
+    labels = dict(interrupt_payload.get("labels") or {})
+    fields = list(schema.get("fields") or [])
+    seen: set[str] = set()
+    for f in fields:
+        if isinstance(f, dict) and f.get("fieldId"):
+            seen.add(str(f["fieldId"]))
+    for key in display:
+        if key in seen:
+            continue
+        fields.append(
+            {
+                "fieldId": key,
+                "label": labels.get(key, key),
+                "path": f"/user/{key}",
+                "inputType": "shortText",
+                "required": key in missing,
+            }
+        )
+    out = dict(schema)
+    out["fields"] = fields
+    return out
+
+
 def _extract_json(text: str) -> dict[str, Any] | None:
     s = text.strip()
     try:
@@ -124,6 +156,8 @@ async def maybe_collect_form_schema_with_meta(
         return None, "llm_client_unavailable"
 
     missing = list(interrupt_payload.get("missing") or [])
+    collect_field_names = list(interrupt_payload.get("collect_field_names") or missing)
+    display = list(interrupt_payload.get("property_api_names") or missing)
     labels = dict(interrupt_payload.get("labels") or {})
     attrs = sanitize_attrs_for_log(dict(interrupt_payload.get("attrs") or {}))
     title = str(interrupt_payload.get("title") or "请补全信息")
@@ -136,12 +170,19 @@ async def maybe_collect_form_schema_with_meta(
             '{"kind":"user_input","title":"...","assistantText":"...",'
             '"actionName":"submit_collect","fields":[{"fieldId":"phone","label":"手机号",'
             '"path":"/user/phone","inputType":"shortText","required":true,"placeholder":"..."}]}'
+            "\nfields 必须覆盖「界面展示顺序 property_api_names」中的每一个属性；"
+            "对仍缺失的字段设 required=true 并供用户输入；对已出现在已知 attrs 中的字段可设 required=false 表示只读摘要。"
         )
     )
     human = HumanMessage(
         content=(
-            f"业务对象={object_type}; 标题={title}; 缺失字段={missing}; 字段标签={labels};"
-            f" 已知字段(已脱敏)={attrs}。请按缺失字段顺序生成 fields，path 必须是 /user/{{fieldId}}。"
+            f"业务对象={object_type}; 标题={title}; "
+            f"本步负责采集的字段 collect_field_names={collect_field_names}; "
+            f"当前仍缺失 missing={missing}; "
+            f"界面须展示的本体属性顺序 property_api_names={display}; "
+            f"字段标签={labels}; 已知字段(已脱敏)={attrs}。\n"
+            "请为 property_api_names 中每一项生成一条 fields；path 必须是 /user/{fieldId}；"
+            "missing 中的项必须可编辑；非 missing 的项用于只读展示已收集信息，不得省略。"
         )
     )
     t0 = time.perf_counter()
@@ -215,6 +256,7 @@ async def maybe_collect_form_schema_with_meta(
             node_id,
             warnings,
         )
+    normalized = enrich_collect_schema_display_fields(normalized, interrupt_payload)
     if not normalized.get("fields"):
         log.warning(
             "llm form schema has no fields after normalization request_id=%s thread_id=%s flow_id=%s node_id=%s",

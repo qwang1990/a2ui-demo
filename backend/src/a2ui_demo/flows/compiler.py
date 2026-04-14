@@ -14,8 +14,9 @@ from a2ui_demo.logging_utils import (
     compiled_graph_mermaid_one_line,
     format_compiled_graph,
 )
-from a2ui_demo.ontology_client import OntologyPlatformClient
-from a2ui_demo.ontology_models import OntologyNode, OntologySpec
+from a2ui_demo.ontology_client import OntologyPlatformClient, interpolate_request_path
+from a2ui_demo.ontology_models import LogicDefinition, OntologyNode, OntologySpec
+from a2ui_demo.ontology_validation import OntologyValidationError, validate_ontology_semantics
 
 log = logging.getLogger(__name__)
 
@@ -27,23 +28,34 @@ class CompiledFlow:
         self.entry = spec.aip_logic.entry
 
 
-def _evaluate_predicate(
+def ensure_compilable(spec: OntologySpec) -> None:
+    errs = validate_ontology_semantics(spec)
+    if errs:
+        raise OntologyValidationError(errs)
+
+
+def _evaluate_logic(
     state: FlowState,
     node: OntologyNode,
     client: OntologyPlatformClient,
+    logic_by_api: dict[str, LogicDefinition],
 ) -> bool:
-    attrs = state.get("attrs") or {}
-    id_number = attrs.get("idNumber")
-    if not id_number:
-        log.debug("predicate %s: missing idNumber", node.id)
+    ref = node.logic_ref or ""
+    ld = logic_by_api.get(ref)
+    if not ld:
+        log.debug("logic node=%s missing definition for logicRef=%s", node.id, ref)
         return False
-    flags = client.fetch_user_flags(str(id_number))
-    pred = node.predicate or ""
-    if pred == "is_sams_member":
-        return bool(flags.get("is_sams_member"))
-    if pred == "has_ms_credit_card":
-        return bool(flags.get("has_ms_credit_card"))
-    return False
+    impl = ld.implementation
+    if impl.type != "mock_user_flags":
+        log.warning("logic node=%s unsupported implementation type=%s", node.id, impl.type)
+        return False
+    attrs = state.get("attrs") or {}
+    path, missing = interpolate_request_path(impl.request_path_template, attrs)
+    if path is None:
+        log.debug("logic node=%s: missing attrs for request path: %s", node.id, missing)
+        return False
+    data = client.get_json(path)
+    return bool(data.get(impl.flag_key))
 
 
 def _logic_router(state: FlowState) -> str:
@@ -54,11 +66,12 @@ def _logic_router(state: FlowState) -> str:
 def _make_logic_node(
     node: OntologyNode,
     client: OntologyPlatformClient,
+    logic_by_api: dict[str, LogicDefinition],
 ) -> Callable[[FlowState], dict[str, Any]]:
     def logic_node(state: FlowState) -> dict[str, Any]:
-        value = _evaluate_predicate(state, node, client)
+        value = _evaluate_logic(state, node, client, logic_by_api)
         branch = "true" if value else "false"
-        log.info("logic node=%s predicate=%s branch=%s", node.id, node.predicate, branch)
+        log.info("logic node=%s logicRef=%s branch=%s", node.id, node.logic_ref, branch)
         return {"_branch": branch, "current_node_id": node.id}
 
     return logic_node
@@ -67,12 +80,14 @@ def _make_logic_node(
 def _make_collect_node(
     node: OntologyNode,
     labels: dict[str, str],
+    display_property_names: list[str],
 ) -> Callable[[FlowState], dict[str, Any]]:
-    prop_names = list(node.property_api_names or [])
+    """display_property_names: 本体对象类型下全部属性顺序，用于 UI 展示已收集项；collect_field_names 仅决定本步缺哪些。"""
+    collect_field_names = list(node.property_api_names or [])
 
     def collect_node(state: FlowState) -> dict[str, Any]:
         attrs = dict(state.get("attrs") or {})
-        missing = [k for k in prop_names if not str(attrs.get(k, "")).strip()]
+        missing = [k for k in collect_field_names if not str(attrs.get(k, "")).strip()]
         if missing:
             log.info("collect node=%s missing=%s objectType=%s", node.id, missing, node.object_type_api_name)
             resume = interrupt(
@@ -80,7 +95,9 @@ def _make_collect_node(
                     "kind": "user_input",
                     "node_id": node.id,
                     "missing": missing,
-                    "labels": {m: labels.get(m, m) for m in missing},
+                    "labels": {k: labels.get(k, k) for k in display_property_names},
+                    "property_api_names": display_property_names,
+                    "collect_field_names": collect_field_names,
                     "title": node.title or "请补全信息",
                     "attrs": dict(attrs),
                     "objectTypeApiName": node.object_type_api_name,
@@ -95,8 +112,9 @@ def _make_collect_node(
     return collect_node
 
 
-def _make_action_node(node: OntologyNode) -> Callable[[FlowState], dict[str, Any]]:
-    name = node.action_name or "action"
+def _make_action_node(node: OntologyNode, spec: OntologySpec) -> Callable[[FlowState], dict[str, Any]]:
+    ad = spec.action_by_api_name().get(node.action_ref or "")
+    name = ad.implementation_key if ad else "action"
 
     def action_node(state: FlowState) -> dict[str, Any]:
         log.info("action node=%s waiting for user confirm action_name=%s", node.id, name)
@@ -135,18 +153,23 @@ def _make_terminal_node(node: OntologyNode) -> Callable[[FlowState], dict[str, A
 
 
 def compile_flow(spec: OntologySpec, client: OntologyPlatformClient) -> CompiledFlow:
+    ensure_compilable(spec)
     labels = spec.property_labels()
+    logic_by_api = spec.logic_by_api_name()
     builder = StateGraph(FlowState)
 
     for node in spec.nodes:
         if node.kind == "logic":
-            builder.add_node(node.id, _make_logic_node(node, client))
+            builder.add_node(node.id, _make_logic_node(node, client, logic_by_api))
         elif node.kind == "collect":
             if not node.property_api_names:
                 raise ValueError(f"collect node {node.id} missing propertyApiNames")
-            builder.add_node(node.id, _make_collect_node(node, labels))
+            display = spec.property_names_for_object_type(node.object_type_api_name)
+            if not display:
+                display = list(node.property_api_names or [])
+            builder.add_node(node.id, _make_collect_node(node, labels, display))
         elif node.kind == "action":
-            builder.add_node(node.id, _make_action_node(node))
+            builder.add_node(node.id, _make_action_node(node, spec))
         elif node.kind == "terminal":
             builder.add_node(node.id, _make_terminal_node(node))
         else:
