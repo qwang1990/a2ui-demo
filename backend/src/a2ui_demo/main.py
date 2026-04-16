@@ -20,6 +20,8 @@ from a2ui_demo.a2ui_contract import (
 from a2ui_demo.a2ui_templates import (
     SURFACE_ID as A2UI_SURFACE_ID,
     build_flow_done_messages,
+    collect_editable_field_keys_for_user_input,
+    intent_to_a2ui_messages,
     interrupt_to_a2ui_messages,
     schema_to_a2ui_messages,
 )
@@ -36,10 +38,12 @@ from a2ui_demo.logging_utils import (
     truncate_json,
 )
 from a2ui_demo.llm_user_input_union import maybe_user_input_ui_bundle
+from a2ui_demo.abox_store import abox_list, abox_query, reload_abox_from_dir
 from a2ui_demo.mock_ontology_demo import MOCK_ONTOLOGY_DEMO_SEEDS
 from a2ui_demo.ontology_client import OntologyPlatformClient
 from a2ui_demo.ontology_models import OntologySpec
-from a2ui_demo.ontology_validation import validate_ontology_full
+from a2ui_demo.ontology_split import has_split_flow, merged_raw_for_api, write_split_from_spec
+from a2ui_demo.ontology_validation import validate_ontology_full, validate_user_attrs
 
 log = logging.getLogger(__name__)
 
@@ -61,9 +65,29 @@ def _ontology_file_path(app: FastAPI, flow_id: str) -> Path:
     return path
 
 
+def _tbox_file_path(app: FastAPI, ref: str) -> Path:
+    _safe_flow_id(ref)
+    base: Path = app.state.ontology_dir / "tbox"
+    path = (base / f"{ref}.json").resolve()
+    if not str(path).startswith(str(base.resolve())):
+        raise HTTPException(status_code=400, detail="invalid path")
+    return path
+
+
+def _abox_file_path(app: FastAPI, ref: str) -> Path:
+    _safe_flow_id(ref)
+    base: Path = app.state.ontology_dir / "abox"
+    path = (base / f"{ref}.json").resolve()
+    if not str(path).startswith(str(base.resolve())):
+        raise HTTPException(status_code=400, detail="invalid path")
+    return path
+
+
 def _validate_start_attrs(spec: OntologySpec, attrs: dict[str, Any]) -> list[dict[str, str]]:
     errors: list[dict[str, str]] = []
+    input_names: list[str] = []
     for inp in spec.aip_logic.inputs:
+        input_names.append(inp.attribute_api_name)
         if not inp.required:
             continue
         v = attrs.get(inp.attribute_api_name)
@@ -74,6 +98,14 @@ def _validate_start_attrs(spec: OntologySpec, attrs: dict[str, Any]) -> list[dic
                     "message": f"Missing required attribute: {inp.attribute_api_name}",
                 }
             )
+    errors.extend(
+        validate_user_attrs(
+            spec,
+            attrs,
+            object_type_api_name=None,
+            property_api_names=input_names,
+        )
+    )
     return errors
 
 
@@ -143,7 +175,7 @@ async def _build_a2ui_messages(
         return interrupt_to_a2ui_messages({}), "template_unknown", None, None
     if intr.get("kind") != "user_input":
         return interrupt_to_a2ui_messages(intr), "template_non_user_input", None, None
-    a2ui_msgs, schema, assistant_union, fallback_reason = await maybe_user_input_ui_bundle(
+    a2ui_msgs, schema, intent, assistant_union, fallback_reason = await maybe_user_input_ui_bundle(
         intr,
         request_id=request_id,
         thread_id=thread_id,
@@ -151,13 +183,34 @@ async def _build_a2ui_messages(
     )
     if a2ui_msgs:
         return a2ui_msgs, "llm_a2ui_v08", assistant_union, None
+    if intent:
+        try:
+            messages = intent_to_a2ui_messages(
+                intent,
+                initial_attrs=dict(intr.get("attrs") or {}),
+                missing_keys=collect_editable_field_keys_for_user_input(intr),
+                interrupt_payload=intr,
+            )
+        except Exception as exc:
+            log.warning(
+                "intent_to_a2ui_messages failed request_id=%s thread_id=%s flow_id=%s err=%s intent=%s",
+                request_id,
+                thread_id,
+                flow_id,
+                exc,
+                truncate_json(intent, 300),
+            )
+            return interrupt_to_a2ui_messages(intr), "template_on_intent_error", None, "intent_to_messages_error"
+        assistant_text = str(intent.get("assistantText") or "").strip() or assistant_union
+        return messages, "llm_intent_compiled", assistant_text, None
     if not schema:
         return interrupt_to_a2ui_messages(intr), "template_fallback", None, fallback_reason
     try:
         messages = schema_to_a2ui_messages(
             schema,
             initial_attrs=dict(intr.get("attrs") or {}),
-            missing_keys=list(intr.get("missing") or []),
+            missing_keys=collect_editable_field_keys_for_user_input(intr),
+            interrupt_payload=intr,
         )
     except Exception as exc:
         log.warning(
@@ -198,6 +251,7 @@ async def lifespan(app: FastAPI):
     registry = FlowRegistry(client)
     odir = ontology_dir()
     n = load_all_json(odir, registry)
+    reload_abox_from_dir(odir)
     log.info("Loaded %d ontology flows from %s", n, odir)
     loaded_flow_ids = sorted(registry.snapshot().keys())
     log.info("loaded_flow_graphs=%s", loaded_flow_ids)
@@ -245,6 +299,71 @@ def mock_ontology_user(id_number: str) -> dict[str, bool]:
     return out
 
 
+@app.get("/api/mock-ontology/user/{user_id}/flags")
+def mock_ontology_user_flags(user_id: str) -> dict[str, Any]:
+    uid = user_id.upper()
+    ms = uid.endswith("MS")
+    sams = uid.endswith("SAMS")
+    return {
+        "found": True,
+        "userId": user_id,
+        "has_ms_credit_card": ms,
+        "is_sams_member": sams,
+    }
+
+
+@app.get("/api/mock-ontology/applicant/query/{full_name}/{id_number}")
+def mock_ontology_query_applicant(full_name: str, id_number: str) -> dict[str, Any]:
+    fid = f"{full_name.strip().upper()}::{id_number.strip().upper()}"
+    known = {
+        "张三::110101199001011234": {"userId": "U1001", "has_ms_credit_card": False, "is_sams_member": False},
+        "李四::11010119900101SAMS_MEMBER234": {"userId": "U1002_SAMS", "has_ms_credit_card": False, "is_sams_member": True},
+        "王五::11010119900101HAS_MS234": {"userId": "U1003_MS", "has_ms_credit_card": True, "is_sams_member": False},
+    }
+    hit = known.get(fid)
+    if hit:
+        return {"found": True, "fullName": full_name, "idNumber": id_number, **hit}
+    uid = f"U_{id_number.strip().upper()}"[:40]
+    if "HAS_MS" in uid and not uid.endswith("MS"):
+        uid = f"{uid}_MS"
+    if "SAMS_MEMBER" in uid and not uid.endswith("SAMS"):
+        uid = f"{uid}_SAMS"
+    return {
+        "found": bool(full_name.strip() and id_number.strip()),
+        "fullName": full_name,
+        "idNumber": id_number,
+        "userId": uid,
+        "has_ms_credit_card": "HAS_MS" in id_number.upper(),
+        "is_sams_member": "SAMS_MEMBER" in id_number.upper(),
+    }
+
+
+@app.get("/api/mock-ontology/abox/{object_type}")
+def mock_abox_list(object_type: str) -> dict[str, Any]:
+    """列出某对象类型的全部 ABox 实例。"""
+    instances = abox_list(object_type)
+    return {"objectType": object_type, "count": len(instances), "instances": instances}
+
+
+@app.post("/api/mock-ontology/abox/{object_type}/query")
+def mock_abox_query(object_type: str, body: Any = Body(...)) -> dict[str, Any]:
+    """按属性查询 ABox 实例。
+
+    body: {"filter": {"fullName": "张三", "idNumber": "..."}, "returnKeys": ["userId", "fullName"]}
+    """
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="body must be a JSON object")
+    filter_attrs = body.get("filter") or {}
+    return_keys = body.get("returnKeys")
+    matches = abox_query(object_type, filter_attrs, return_keys)
+    return {
+        "objectType": object_type,
+        "found": len(matches) > 0,
+        "count": len(matches),
+        "instances": matches,
+    }
+
+
 @app.get("/api/mock-ontology/demo-seeds")
 def mock_ontology_demo_seeds() -> dict[str, Any]:
     """演示用姓名+身份证样例及预期 flags，供前端与人工对照。"""
@@ -272,8 +391,33 @@ def validate_ontology_endpoint(body: Any = Body(...)) -> dict[str, Any]:
     return {"ok": True, "errors": []}
 
 
+@app.get("/api/ontology/tbox/{ref}")
+def get_ontology_tbox(ref: str) -> dict[str, Any]:
+    """只读：返回 ``ontology/tbox/{ref}.json``（Mock，后续可由本体平台对接替换数据源）。"""
+    path = _tbox_file_path(app, ref)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="tbox file not found")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+@app.get("/api/ontology/abox/{ref}")
+def get_ontology_abox(ref: str) -> dict[str, Any]:
+    """只读：返回 ``ontology/abox/{ref}.json``（Mock 实例数据）。"""
+    path = _abox_file_path(app, ref)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="abox file not found")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
 @app.get("/api/ontology/{flow_id}")
 def get_ontology(flow_id: str) -> dict[str, Any]:
+    flow_id = _safe_flow_id(flow_id)
+    odir: Path = app.state.ontology_dir
+    if has_split_flow(odir, flow_id):
+        raw = merged_raw_for_api(odir, flow_id)
+        if raw is None:
+            raise HTTPException(status_code=500, detail="failed to merge split ontology files")
+        return {"flow_id": flow_id, "raw": raw}
     path = _ontology_file_path(app, flow_id)
     if not path.is_file():
         raise HTTPException(status_code=404, detail="ontology file not found")
@@ -282,6 +426,8 @@ def get_ontology(flow_id: str) -> dict[str, Any]:
 
 @app.put("/api/ontology/{flow_id}")
 def put_ontology(flow_id: str, body: Any = Body(...)) -> dict[str, Any]:
+    flow_id = _safe_flow_id(flow_id)
+    odir: Path = app.state.ontology_dir
     path = _ontology_file_path(app, flow_id)
     payload = _coerce_validate_payload(body)
     spec, errors = validate_ontology_full(payload)
@@ -303,16 +449,25 @@ def put_ontology(flow_id: str, body: Any = Body(...)) -> dict[str, Any]:
                 ],
             },
         )
-    raw_out = (
-        json.dumps(spec.model_dump(mode="json", by_alias=True), ensure_ascii=False, indent=2)
-        + "\n"
-    )
-    path.write_text(raw_out, encoding="utf-8")
+    if spec.aip_logic_graph:
+        spec.nodes = spec.aip_logic_graph.to_ontology_nodes()
     reg: FlowRegistry = app.state.registry
-    client: OntologyPlatformClient = app.state.ontology_client
-    loaded = reg.load_file(path)
+    if has_split_flow(odir, flow_id):
+        write_split_from_spec(odir, flow_id, spec)
+        raw_reload = merged_raw_for_api(odir, flow_id)
+        if raw_reload is None:
+            raise HTTPException(status_code=500, detail="failed to merge ontology after split write")
+        loaded = reg.load_from_raw(raw_reload, source=f"split:{flow_id}")
+    else:
+        raw_out = (
+            json.dumps(spec.model_dump(mode="json", by_alias=True), ensure_ascii=False, indent=2)
+            + "\n"
+        )
+        path.write_text(raw_out, encoding="utf-8")
+        loaded = reg.load_file(path)
     if loaded is None:
         raise HTTPException(status_code=500, detail="failed to compile ontology after write")
+    reload_abox_from_dir(odir)
     return {"ok": True, "flow_id": spec.aip_logic.id, "errors": []}
 
 
@@ -324,10 +479,11 @@ async def _send_flow_done(
     request_id: str,
     flow_id: str,
     registry: FlowRegistry,
+    compiled_flow: Any | None = None,
 ) -> None:
     attrs = dict(result.get("attrs") or {})
     a2ui_messages: list[dict[str, Any]] = []
-    compiled = registry.get(flow_id) if flow_id else None
+    compiled = compiled_flow or (registry.get(flow_id) if flow_id else None)
     if compiled:
         spec = compiled.spec
         a2ui_messages = build_flow_done_messages(
@@ -367,6 +523,7 @@ async def _send_progress(
     *,
     request_id: str,
     interrupt_value: dict[str, Any] | None = None,
+    ontology_revision: str | None = None,
 ) -> None:
     cur = result.get("current_node_id")
     if interrupt_value and interrupt_value.get("node_id"):
@@ -380,6 +537,7 @@ async def _send_progress(
         "current_node_id": cur_id,
         "step_hint": result.get("step_hint"),
         "business_info": business_info,
+        "ontology_revision": ontology_revision,
     }
     log.info(
         "ws send flow_progress request_id=%s thread_id=%s current_node_id=%s has_hint=%s business_keys=%s",
@@ -404,6 +562,7 @@ async def _send_a2ui_batch(
     assistant_text: str | None,
     fallback_reason: FallbackReason | None,
     reason_tag: str,
+    ontology_revision: str | None = None,
 ) -> None:
     source_with_reason = compose_messages_source(source, fallback_reason)
     log.info(
@@ -428,6 +587,7 @@ async def _send_a2ui_batch(
             "assistant_text": assistant_text,
             "messages_source": source_with_reason,
             "fallback_reason": fallback_reason,
+            "ontology_revision": ontology_revision,
         }
     )
 
@@ -436,7 +596,7 @@ async def _send_a2ui_batch(
 async def websocket_endpoint(ws: WebSocket) -> None:
     await ws.accept()
     reg: FlowRegistry = app.state.registry
-    sessions: dict[str, str] = app.state.sessions
+    sessions: dict[str, dict[str, Any]] = app.state.sessions
     try:
         while True:
             raw = await ws.receive_text()
@@ -470,7 +630,12 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                     sanitize_attrs_for_log(attrs),
                 )
                 thread_id, result = await start_flow(compiled, attrs, flow_id)
-                sessions[thread_id] = flow_id
+                revision = compiled.ontology_revision
+                sessions[thread_id] = {
+                    "flow_id": flow_id,
+                    "ontology_revision": revision,
+                    "compiled_flow": compiled,
+                }
                 intr = extract_interrupt_value(result)
                 await _send_progress(
                     ws,
@@ -479,6 +644,7 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                     compiled.spec,
                     request_id=request_id,
                     interrupt_value=intr if isinstance(intr, dict) else None,
+                    ontology_revision=revision,
                 )
                 if intr is not None:
                     messages, source, assistant_text, fallback_reason = await _build_a2ui_messages(
@@ -498,9 +664,11 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                         assistant_text=assistant_text,
                         fallback_reason=fallback_reason,
                         reason_tag="start_flow",
+                        ontology_revision=revision,
                     )
                 elif result.get("outcome") is not None:
-                    fid = str(sessions.get(thread_id) or flow_id or "")
+                    fid = str((sessions.get(thread_id) or {}).get("flow_id") or flow_id or "")
+                    done_compiled = (sessions.get(thread_id) or {}).get("compiled_flow")
                     await _send_flow_done(
                         ws,
                         thread_id,
@@ -508,14 +676,17 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                         request_id=request_id,
                         flow_id=fid,
                         registry=reg,
+                        compiled_flow=done_compiled,
                     )
                 else:
                     log.error("unexpected graph result keys=%s", list(result.keys()))
                     await ws.send_json({"type": "error", "message": "Unexpected graph result", "result": result})
             elif mtype == "resume":
                 thread_id = str(msg.get("thread_id") or "")
-                flow_id = str(msg.get("flow_id") or sessions.get(thread_id) or "")
-                compiled = reg.get(flow_id)
+                session = sessions.get(thread_id) or {}
+                flow_id = str(msg.get("flow_id") or session.get("flow_id") or "")
+                compiled = session.get("compiled_flow") or reg.get(flow_id)
+                revision = str(session.get("ontology_revision") or getattr(compiled, "ontology_revision", ""))
                 if not compiled:
                     await ws.send_json({"type": "error", "message": "Unknown flow for resume"})
                     continue
@@ -537,6 +708,7 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                     compiled.spec,
                     request_id=request_id,
                     interrupt_value=intr if isinstance(intr, dict) else None,
+                    ontology_revision=revision or None,
                 )
                 if intr is not None:
                     messages, source, assistant_text, fallback_reason = await _build_a2ui_messages(
@@ -556,9 +728,11 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                         assistant_text=assistant_text,
                         fallback_reason=fallback_reason,
                         reason_tag="resume",
+                        ontology_revision=revision or None,
                     )
                 elif result.get("outcome") is not None:
-                    fid = str(sessions.get(thread_id) or flow_id or "")
+                    fid = str((sessions.get(thread_id) or {}).get("flow_id") or flow_id or "")
+                    done_compiled = (sessions.get(thread_id) or {}).get("compiled_flow")
                     await _send_flow_done(
                         ws,
                         thread_id,
@@ -566,14 +740,17 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                         request_id=request_id,
                         flow_id=fid,
                         registry=reg,
+                        compiled_flow=done_compiled,
                     )
                 else:
                     log.error("unexpected graph result after resume keys=%s", list(result.keys()))
                     await ws.send_json({"type": "error", "message": "Unexpected graph result", "result": result})
             elif mtype == "a2ui_event":
                 thread_id = str(msg.get("thread_id") or "")
-                flow_id = str(msg.get("flow_id") or sessions.get(thread_id) or "")
-                compiled = reg.get(flow_id)
+                session = sessions.get(thread_id) or {}
+                flow_id = str(msg.get("flow_id") or session.get("flow_id") or "")
+                compiled = session.get("compiled_flow") or reg.get(flow_id)
+                revision = str(session.get("ontology_revision") or getattr(compiled, "ontology_revision", ""))
                 if not compiled:
                     await ws.send_json({"type": "error", "message": "Unknown flow for event"})
                     continue
@@ -605,6 +782,7 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                     compiled.spec,
                     request_id=request_id,
                     interrupt_value=intr if isinstance(intr, dict) else None,
+                    ontology_revision=revision or None,
                 )
                 if intr is not None:
                     messages, source, assistant_text, fallback_reason = await _build_a2ui_messages(
@@ -624,9 +802,11 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                         assistant_text=assistant_text,
                         fallback_reason=fallback_reason,
                         reason_tag="a2ui_event",
+                        ontology_revision=revision or None,
                     )
                 elif result.get("outcome") is not None:
-                    fid = str(sessions.get(thread_id) or flow_id or "")
+                    fid = str((sessions.get(thread_id) or {}).get("flow_id") or flow_id or "")
+                    done_compiled = (sessions.get(thread_id) or {}).get("compiled_flow")
                     await _send_flow_done(
                         ws,
                         thread_id,
@@ -634,6 +814,7 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                         request_id=request_id,
                         flow_id=fid,
                         registry=reg,
+                        compiled_flow=done_compiled,
                     )
                 else:
                     log.error("unexpected graph result after event keys=%s", list(result.keys()))

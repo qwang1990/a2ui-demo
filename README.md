@@ -6,7 +6,7 @@
 
 ## 结构
 
-- [`ontology/`](ontology/)：Palantir Foundry 风格的 **objectTypes / properties** + AIP 流程节点（`sam_credit_card`、`simple_kyc`），支持热加载。
+- [`ontology/`](ontology/)：山姆信用卡开卡演示；**TBox**（`tbox/`）、**ABox**（`abox/`）、**流程编排**（`flows/`）分文件存储（Mock），编排保存会更新 `flows/sam_credit_card.json`，详见 `ontology_split` 与 `ontology_platform_stub`。
 - [`backend/`](backend/)：FastAPI + WebSocket + LangGraph + OpenRouter（可选 A2UI / 表单 schema）+ 全链路日志（`LOG_LEVEL`）。
 - [`frontend/`](frontend/)：Vite + Lit Web Components，采用“固定首表单 + 对话时间线 + 动态 A2UI 卡片”交互，渲染服务端下发的 A2UI 消息。
 

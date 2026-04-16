@@ -45,6 +45,10 @@ def llm_form_schema_enabled() -> bool:
     return os.environ.get("ENABLE_LLM_FORM_SCHEMA", "1").lower() in ("1", "true", "yes")
 
 
+def llm_ui_intent_enabled() -> bool:
+    return os.environ.get("ENABLE_LLM_UI_INTENT", "1").lower() in ("1", "true", "yes")
+
+
 def llm_full_a2ui_enabled() -> bool:
     """When true, user_input LLM may return full v0.8 A2UI messages (see llm_user_input_union)."""
-    return os.environ.get("ENABLE_LLM_FULL_A2UI", "1").lower() in ("1", "true", "yes")
+    return os.environ.get("ENABLE_LLM_FULL_A2UI", "0").lower() in ("1", "true", "yes")

@@ -33,6 +33,11 @@ class LlmFormField(BaseModel):
     input_type: str = Field("shortText", alias="inputType")
     required: bool = True
     placeholder: str | None = None
+    field_error: str | None = Field(
+        None,
+        alias="fieldError",
+        description="当 validationErrors 含该 fieldId 时，填写面向用户的错误说明，展示在输入框下方",
+    )
 
 
 class LlmCollectSchema(BaseModel):
@@ -163,15 +168,19 @@ async def maybe_collect_form_schema_with_meta(
     title = str(interrupt_payload.get("title") or "请补全信息")
     object_type = str(interrupt_payload.get("objectTypeApiName") or "")
     node_id = str(interrupt_payload.get("node_id") or "")
+    constraints = dict(interrupt_payload.get("constraints") or {})
+    validation_errors = list(interrupt_payload.get("validationErrors") or [])
     sys = SystemMessage(
         content=(
             "你是流程表单设计助手。请仅输出一个 JSON 对象，不要输出 markdown。\n"
             "JSON 结构必须是："
             '{"kind":"user_input","title":"...","assistantText":"...",'
             '"actionName":"submit_collect","fields":[{"fieldId":"phone","label":"手机号",'
-            '"path":"/user/phone","inputType":"shortText","required":true,"placeholder":"..."}]}'
+            '"path":"/user/phone","inputType":"shortText","required":true,"placeholder":"...","fieldError":"..."}]}'
             "\nfields 必须覆盖「界面展示顺序 property_api_names」中的每一个属性；"
-            "对仍缺失的字段设 required=true 并供用户输入；对已出现在已知 attrs 中的字段可设 required=false 表示只读摘要。"
+            "对仍缺失的字段设 required=true 并供用户输入；对已出现在已知 attrs 中的字段可设 required=false 表示只读摘要。\n"
+            "若 validationErrors 非空：必须在 assistantText 中概括问题；对 validationErrors 里出现的每个 path，"
+            "在对应 field 上设置 fieldError 为用户可读的错误原因（与 message 一致或略改写）。"
         )
     )
     human = HumanMessage(
@@ -180,9 +189,11 @@ async def maybe_collect_form_schema_with_meta(
             f"本步负责采集的字段 collect_field_names={collect_field_names}; "
             f"当前仍缺失 missing={missing}; "
             f"界面须展示的本体属性顺序 property_api_names={display}; "
-            f"字段标签={labels}; 已知字段(已脱敏)={attrs}。\n"
+            f"字段标签={labels}; 已知字段(已脱敏)={attrs}; 字段约束 constraints={constraints}; "
+            f"当前校验错误 validationErrors={validation_errors}。\n"
             "请为 property_api_names 中每一项生成一条 fields；path 必须是 /user/{fieldId}；"
-            "missing 中的项必须可编辑；非 missing 的项用于只读展示已收集信息，不得省略。"
+            "missing 中的项必须可编辑；非 missing 的项用于只读展示已收集信息，不得省略。\n"
+            "validationErrors 非空时：assistantText 说明整体情况；每条出错字段必须带 fieldError。"
         )
     )
     t0 = time.perf_counter()

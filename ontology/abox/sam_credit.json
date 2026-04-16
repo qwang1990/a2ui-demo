@@ -1,0 +1,54 @@
+{
+  "ApplicantUser": [
+    {
+      "fullName": "张三",
+      "idNumber": "110101199001011234",
+      "userId": "U1001",
+      "phone": "13900001001",
+      "age": 30,
+      "address": "北京市东城区XX路1号",
+      "has_ms_credit_card": false,
+      "is_sams_member": false
+    },
+    {
+      "fullName": "李四",
+      "idNumber": "11010119900101SAMS_MEMBER234",
+      "userId": "U1002",
+      "phone": "13900001002",
+      "age": 25,
+      "address": "上海市浦东新区YY路2号",
+      "has_ms_credit_card": false,
+      "is_sams_member": true
+    },
+    {
+      "fullName": "王五",
+      "idNumber": "11010119900101HAS_MS234",
+      "userId": "U1003",
+      "phone": "13900001003",
+      "age": 35,
+      "address": "深圳市南山区ZZ路3号",
+      "has_ms_credit_card": true,
+      "is_sams_member": false
+    },
+    {
+      "fullName": "赵六",
+      "idNumber": "SAMS_MEMBER_HAS_MS",
+      "userId": "U1004",
+      "phone": "13900001004",
+      "age": 28,
+      "address": "广州市天河区AA路4号",
+      "has_ms_credit_card": true,
+      "is_sams_member": true
+    },
+    {
+      "fullName": "钱七",
+      "idNumber": "440101199503073456",
+      "userId": "U1005",
+      "phone": "13900001005",
+      "age": 31,
+      "address": "杭州市西湖区BB路5号",
+      "has_ms_credit_card": false,
+      "is_sams_member": false
+    }
+  ]
+}

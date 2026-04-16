@@ -22,6 +22,16 @@ def test_get_ontology_sam() -> None:
     assert "sam_credit_card" in data.get("raw", "")
 
 
+def test_get_tbox_and_abox_files() -> None:
+    with TestClient(app) as client:
+        rt = client.get("/api/ontology/tbox/sam_credit")
+        ra = client.get("/api/ontology/abox/sam_credit")
+    assert rt.status_code == 200
+    assert ra.status_code == 200
+    assert "objectTypes" in rt.json()
+    assert "ApplicantUser" in ra.json()
+
+
 def test_demo_seeds() -> None:
     with TestClient(app) as client:
         r = client.get("/api/mock-ontology/demo-seeds")

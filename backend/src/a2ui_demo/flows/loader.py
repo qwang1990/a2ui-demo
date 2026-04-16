@@ -7,6 +7,7 @@ from pathlib import Path
 
 from a2ui_demo.flows.compiler import CompiledFlow, compile_flow
 from a2ui_demo.ontology_client import OntologyPlatformClient
+from a2ui_demo.ontology_split import merged_raw_for_api
 from a2ui_demo.ontology_validation import validate_ontology_full
 
 log = logging.getLogger(__name__)
@@ -35,24 +36,42 @@ class FlowRegistry:
     def load_file(self, path: Path) -> CompiledFlow | None:
         try:
             raw = path.read_text(encoding="utf-8")
+            return self.load_from_raw(raw, source=str(path))
+        except (OSError, ValueError) as e:
+            log.error("Failed to load ontology %s: %s", path, e)
+            return None
+
+    def load_from_raw(self, raw: str, *, source: str = "") -> CompiledFlow | None:
+        try:
             spec, errors = validate_ontology_full(raw)
             if spec is None:
-                log.error("Failed to validate ontology %s: %s", path, errors)
+                log.error("Failed to validate ontology source=%s: %s", source or "(raw)", errors)
                 return None
             flow = compile_flow(spec, self._client)
             self.register(flow)
-            log.info("Loaded ontology flow %s from %s", spec.aip_logic.id, path)
+            log.info("Loaded ontology flow %s from %s", spec.aip_logic.id, source or "raw")
             return flow
         except (OSError, ValueError) as e:
-            log.error("Failed to load ontology %s: %s", path, e)
+            log.error("Failed to load ontology source=%s: %s", source or "(raw)", e)
             return None
 
 
 def load_all_json(dir_path: Path, registry: FlowRegistry) -> int:
     if not dir_path.is_dir():
         return 0
+    loaded_ids: set[str] = set()
     n = 0
+    flows_dir = dir_path / "flows"
+    if flows_dir.is_dir():
+        for p in sorted(flows_dir.glob("*.json")):
+            fid = p.stem
+            raw = merged_raw_for_api(dir_path, fid)
+            if raw and registry.load_from_raw(raw, source=f"split:{fid}"):
+                loaded_ids.add(fid)
+                n += 1
     for p in sorted(dir_path.glob("*.json")):
+        if p.stem in loaded_ids:
+            continue
         if registry.load_file(p):
             n += 1
     return n

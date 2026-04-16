@@ -4,8 +4,12 @@ from a2ui_demo.a2ui_templates import (
     SURFACE_ID,
     build_collect_form_messages,
     build_flow_done_messages,
+    collect_editable_field_keys_for_user_input,
+    intent_to_a2ui_messages,
     interrupt_to_a2ui_messages,
+    merge_assistant_with_validation,
     schema_to_a2ui_messages,
+    should_show_validation_error_details,
 )
 
 
@@ -77,6 +81,129 @@ def test_interrupt_partial_collect_shows_readonly_and_editable() -> None:
     assert keys_dm == ["fullName", "idNumber", "phone"]
 
 
+def test_interrupt_validation_error_makes_field_editable_when_missing_empty() -> None:
+    """校验失败但非「未填」时 missing 为空；仍应对出错采集项渲染 TextField。"""
+    msgs = interrupt_to_a2ui_messages(
+        {
+            "kind": "user_input",
+            "node_id": "collect_detail",
+            "missing": [],
+            "collect_field_names": ["phone", "age", "address"],
+            "validationErrors": [{"path": "age", "message": "must be an integer"}],
+            "labels": {"fullName": "姓名", "phone": "手机号", "age": "年龄", "address": "住址"},
+            "property_api_names": ["fullName", "phone", "age", "address"],
+            "title": "补全",
+            "attrs": {"fullName": "A", "phone": "13900000000", "age": "11", "address": "x"},
+        }
+    )
+    su = next(m for m in msgs if "surfaceUpdate" in m)["surfaceUpdate"]["components"]
+    age_f = next(c for c in su if c["id"] == "field_age_2")
+    assert "TextField" in age_f["component"]
+    fn = next(c for c in su if c["id"] == "field_fullName_0")
+    assert "Text" in fn["component"]
+    asst = next(c for c in su if c["id"] == "assistant_txt")
+    assert "请修正" in asst["component"]["Text"]["text"]["literalString"]
+    err_age = next(c for c in su if c["id"] == "err_age_2")
+    assert "错误：" in err_age["component"]["Text"]["text"]["literalString"]
+
+
+def test_should_show_validation_error_details_only_after_user_filled_value() -> None:
+    assert (
+        should_show_validation_error_details(
+            {
+                "attrs": {"fullName": "A"},
+                "collect_field_names": ["phone"],
+                "validationErrors": [{"path": "phone", "message": "bad"}],
+            }
+        )
+        is False
+    )
+    assert (
+        should_show_validation_error_details(
+            {
+                "attrs": {"phone": "12"},
+                "collect_field_names": ["phone"],
+                "validationErrors": [{"path": "phone", "message": "bad"}],
+            }
+        )
+        is True
+    )
+
+
+def test_interrupt_first_paint_no_validation_error_banner_or_field_errors() -> None:
+    """首次进入、采集项均为空：不展示「请修正」与字段下红字。"""
+    msgs = interrupt_to_a2ui_messages(
+        {
+            "kind": "user_input",
+            "node_id": "collect_detail",
+            "missing": ["phone", "age", "address"],
+            "collect_field_names": ["phone", "age", "address"],
+            "validationErrors": [
+                {"path": "phone", "message": "手机号必须为11位数字"},
+                {"path": "age", "message": "age is required"},
+            ],
+            "labels": {"fullName": "姓名", "phone": "手机号", "age": "年龄", "address": "住址"},
+            "property_api_names": ["fullName", "phone", "age", "address"],
+            "title": "补充",
+            "attrs": {"fullName": "张三"},
+        }
+    )
+    su = next(m for m in msgs if "surfaceUpdate" in m)["surfaceUpdate"]["components"]
+    assert not any(str(c.get("id", "")).startswith("err_") for c in su)
+    assert not any(c.get("id") == "assistant_txt" for c in su)
+
+
+def test_merge_assistant_with_validation_appends_block() -> None:
+    out = merge_assistant_with_validation("请先阅读说明。", [{"path": "phone", "message": "bad"}])
+    assert out is not None
+    assert "请先阅读" in out
+    assert "phone" in out
+    assert "bad" in out
+
+
+def test_schema_to_a2ui_messages_server_validation_overrides_llm_field_error() -> None:
+    msgs = schema_to_a2ui_messages(
+        {
+            "kind": "user_input",
+            "title": "T",
+            "assistantText": "说明",
+            "actionName": "submit_collect",
+            "fields": [
+                {
+                    "fieldId": "phone",
+                    "label": "手机",
+                    "path": "/user/phone",
+                    "inputType": "shortText",
+                    "required": True,
+                    "fieldError": "LLM 旧文案",
+                }
+            ],
+        },
+        initial_attrs={"phone": "123"},
+        missing_keys=["phone"],
+        interrupt_payload={
+            "collect_field_names": ["phone"],
+            "validationErrors": [{"path": "phone", "message": "服务器权威"}],
+            "attrs": {"phone": "123"},
+        },
+    )
+    su = next(m for m in msgs if "surfaceUpdate" in m)["surfaceUpdate"]["components"]
+    err = next(c for c in su if c["id"] == "err_phone_0")
+    assert "服务器权威" in err["component"]["Text"]["text"]["literalString"]
+
+
+def test_collect_editable_field_keys_unions_missing_and_invalid_paths() -> None:
+    keys = collect_editable_field_keys_for_user_input(
+        {
+            "missing": ["phone"],
+            "collect_field_names": ["phone", "age"],
+            "validationErrors": [{"path": "age", "message": "bad"}],
+            "property_api_names": ["phone", "age"],
+        }
+    )
+    assert set(keys) == {"phone", "age"}
+
+
 def test_interrupt_action() -> None:
     msgs = interrupt_to_a2ui_messages(
         {"kind": "action", "node_id": "f", "action_name": "face", "title": "人脸"}
@@ -111,6 +238,45 @@ def test_schema_to_a2ui_messages_user_input() -> None:
     su = msgs[0]["surfaceUpdate"]["components"]
     assert any(c["id"] == "assistant_txt" for c in su)
     assert any(c["id"] == "field_phone_0" for c in su)
+
+
+def test_intent_to_a2ui_messages_collect_form() -> None:
+    msgs = intent_to_a2ui_messages(
+        {
+            "kind": "collect_form",
+            "title": "补全信息",
+            "assistantText": "请补全手机号",
+            "actionName": "submit_collect",
+            "fields": [
+                {
+                    "fieldId": "fullName",
+                    "label": "姓名",
+                    "path": "/user/fullName",
+                    "inputType": "shortText",
+                    "editable": False,
+                },
+                {
+                    "fieldId": "phone",
+                    "label": "手机号",
+                    "path": "/user/phone",
+                    "inputType": "shortText",
+                    "editable": True,
+                },
+            ],
+            "submitFields": ["fullName", "phone"],
+        },
+        initial_attrs={"fullName": "张三"},
+        missing_keys=["phone"],
+    )
+    assert len(msgs) == 3
+    su = msgs[0]["surfaceUpdate"]["components"]
+    readonly = next(c for c in su if c["id"] == "field_fullName_0")
+    assert "Text" in readonly["component"]
+    editable = next(c for c in su if c["id"] == "field_phone_1")
+    assert "TextField" in editable["component"]
+    btn = next(c for c in su if c["id"] == "submit_btn")
+    ctx = btn["component"]["Button"]["action"]["context"]
+    assert [x["key"] for x in ctx] == ["fullName", "phone"]
 
 
 def test_build_flow_done_messages_dynamic_attrs() -> None:

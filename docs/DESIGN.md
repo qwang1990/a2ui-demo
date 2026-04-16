@@ -301,9 +301,17 @@ flowchart LR
 
 `a2ui_batch.messages_source` 用于标记卡片生成来源：
 
+- `llm_intent_compiled`：`user_input` 中断由 LLM 先输出 `uiIntent`，后端再编译成 A2UI v0.8（主路径）。
 - `llm_schema`：`user_input` 中断先经 LLM 输出结构化 schema，再转 A2UI。
 - `template_fallback`：LLM 失败/未启用时回退模板。
+- `template_on_intent_error`：`uiIntent` 解析/编译失败时回退模板。
 - `template_non_user_input`：`action` 等非 `user_input` 中断直接模板。
+
+推荐开关矩阵：
+
+- `ENABLE_LLM_UI_INTENT=1`：开启 intent-first 主路径。
+- `ENABLE_LLM_FORM_SCHEMA=1`：保留 schema 兼容路径。
+- `ENABLE_LLM_FULL_A2UI=0`：默认关闭，作为实验路径按需开启。
 
 ---
 

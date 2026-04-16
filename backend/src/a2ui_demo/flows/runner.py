@@ -143,7 +143,11 @@ async def start_flow(
     """Start a new thread; returns (thread_id, result_or_interrupt_payload)."""
     thread_id = str(uuid.uuid4())
     config = {"configurable": {"thread_id": thread_id}}
-    initial: FlowState = {"attrs": dict(attrs), "flow_id": flow_id}
+    initial: FlowState = {
+        "attrs": dict(attrs),
+        "flow_id": flow_id,
+        "ontology_revision": compiled.ontology_revision,
+    }
     log.info("graph start_flow thread_id=%s flow_id=%s attr_keys=%s", thread_id, flow_id, list(attrs.keys()))
     result = await asyncio.to_thread(
         _invoke_sync_with_stream_log,

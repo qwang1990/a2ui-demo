@@ -7,6 +7,7 @@ class FlowState(TypedDict, total=False):
     """LangGraph state for AIP logic execution."""
 
     flow_id: str
+    ontology_revision: str | None
     attrs: dict[str, Any]
     outcome: str | None
     terminal_message: str | None

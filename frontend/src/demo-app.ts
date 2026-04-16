@@ -72,11 +72,6 @@ export class DemoApp extends SignalWatcher(LitElement) {
 
   @state() private _uiPhase: UiPhase = 'splash'
   @state() private _splashError = ''
-  /** 本体 JSON 编辑器（与当前「办理类型」flowId 对应） */
-  @state() private _ontologyText = ''
-  @state() private _ontologyStatus = ''
-  @state() private _ontologyErrors: { path: string; message: string }[] = []
-  @state() private _ontologyBusy = false
   @state() private _status = ''
   @state() private _flowId = 'sam_credit_card'
   @state() private _fullName = ''
@@ -174,14 +169,7 @@ export class DemoApp extends SignalWatcher(LitElement) {
   }
 
   private _flowLabel(): string {
-    switch (this._flowId) {
-      case 'sam_credit_card':
-        return '山姆信用卡'
-      case 'simple_kyc':
-        return '简单 KYC'
-      default:
-        return this._flowId
-    }
+    return this._flowId === 'sam_credit_card' ? '山姆信用卡开卡' : this._flowId
   }
 
   private _buildProgressNarrative(msg: Record<string, unknown>): string[] {
@@ -231,81 +219,6 @@ export class DemoApp extends SignalWatcher(LitElement) {
     }
     if (nodeId) lines.push(`流程推进到节点：${nodeId}`)
     return lines
-  }
-
-  private async _ontologyLoad(): Promise<void> {
-    this._ontologyBusy = true
-    this._ontologyStatus = ''
-    this._ontologyErrors = []
-    try {
-      const r = await fetch(`/api/ontology/${encodeURIComponent(this._flowId)}`)
-      if (!r.ok) {
-        this._ontologyStatus = `加载失败：HTTP ${r.status}`
-        return
-      }
-      const j = (await r.json()) as { raw?: string }
-      this._ontologyText = j.raw ?? ''
-      this._ontologyStatus = '已从服务器加载'
-    } catch (e) {
-      this._ontologyStatus = e instanceof Error ? e.message : '加载异常'
-    } finally {
-      this._ontologyBusy = false
-    }
-  }
-
-  private async _ontologyValidate(): Promise<void> {
-    this._ontologyBusy = true
-    this._ontologyStatus = ''
-    this._ontologyErrors = []
-    try {
-      const r = await fetch('/api/ontology/validate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ raw: this._ontologyText }),
-      })
-      const j = (await r.json()) as { ok?: boolean; errors?: { path: string; message: string }[] }
-      if (j.ok) {
-        this._ontologyStatus = '校验通过'
-      } else {
-        this._ontologyStatus = '校验未通过'
-        this._ontologyErrors = j.errors ?? []
-      }
-    } catch (e) {
-      this._ontologyStatus = e instanceof Error ? e.message : '校验请求失败'
-    } finally {
-      this._ontologyBusy = false
-    }
-  }
-
-  private async _ontologySave(): Promise<void> {
-    this._ontologyBusy = true
-    this._ontologyStatus = ''
-    this._ontologyErrors = []
-    try {
-      const r = await fetch(`/api/ontology/${encodeURIComponent(this._flowId)}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ raw: this._ontologyText }),
-      })
-      const body = (await r.json().catch(() => ({}))) as {
-        detail?: string | { message?: string; errors?: { path: string; message: string }[] }
-      }
-      if (!r.ok) {
-        this._ontologyStatus = '保存失败'
-        const d = body.detail
-        if (d && typeof d === 'object' && Array.isArray(d.errors) && d.errors.length) {
-          this._ontologyErrors = d.errors
-        } else if (typeof d === 'string') {
-          this._ontologyStatus = d
-        }
-        return
-      }
-      this._ontologyStatus = '已保存并应用（新会话将使用新图）'
-    } catch (e) {
-      this._ontologyStatus = e instanceof Error ? e.message : '保存异常'
-    } finally {
-      this._ontologyBusy = false
-    }
   }
 
   private _resetToSplash(): void {
@@ -506,19 +419,7 @@ export class DemoApp extends SignalWatcher(LitElement) {
         </header>
         <section class="card splash-card">
           <h2 class="card-title">开始办理</h2>
-          <label>办理类型</label>
-          <select
-            .value=${this._flowId}
-            @change=${(e: Event) => {
-              this._flowId = (e.target as HTMLSelectElement).value
-              this._ontologyText = ''
-              this._ontologyStatus = ''
-              this._ontologyErrors = []
-            }}
-          >
-            <option value="sam_credit_card">山姆信用卡</option>
-            <option value="simple_kyc">简单 KYC</option>
-          </select>
+          <p class="muted flow-hint">当前流程：<strong>${this._flowLabel()}</strong>（<code>sam_credit_card</code>）</p>
           <label>姓名</label>
           <input
             name="fullName"
@@ -546,42 +447,9 @@ export class DemoApp extends SignalWatcher(LitElement) {
           </p>
           ${this._splashError ? html`<p class="form-error" role="alert">${this._splashError}</p>` : null}
           <button type="button" class="primary" @click=${() => this._onBeginCard()}>办卡</button>
-        </section>
-        <section class="card splash-card ontology-card">
-          <h2 class="card-title">本体 JSON（手动加载 / 校验 / 保存）</h2>
-          <p class="hint">
-            与上方「办理类型」对应的 <code>${this._flowId}.json</code>。保存前会先校验；通过后写入并重新编译 LangGraph（不监视文件）。
-          </p>
-          <div class="ontology-toolbar">
-            <button type="button" class="btn-secondary" ?disabled=${this._ontologyBusy} @click=${() => void this._ontologyLoad()}>
-              从服务器加载
-            </button>
-            <button type="button" class="btn-secondary" ?disabled=${this._ontologyBusy} @click=${() => void this._ontologyValidate()}>
-              校验
-            </button>
-            <button type="button" class="btn-secondary" ?disabled=${this._ontologyBusy} @click=${() => void this._ontologySave()}>
-              保存并应用
-            </button>
-          </div>
-          ${this._ontologyStatus
-            ? html`<p class="ontology-status">${this._ontologyStatus}</p>`
-            : null}
-          ${this._ontologyErrors.length
-            ? html`<ul class="ontology-errors" role="alert">
-                ${this._ontologyErrors.map(
-                  (e) => html`<li><code>${e.path || '(root)'}</code> — ${e.message}</li>`,
-                )}
-              </ul>`
-            : null}
-          <textarea
-            class="ontology-textarea"
-            spellcheck="false"
-            .value=${this._ontologyText}
-            placeholder="点击「从服务器加载」或粘贴 ontology JSON…"
-            @input=${(e: Event) => {
-              this._ontologyText = (e.target as HTMLTextAreaElement).value
-            }}
-          ></textarea>
+          <a class="btn-secondary nav-ontology" href=${`/ontology.html?flow=${encodeURIComponent(this._flowId)}`}>
+            打开本体与 AIP Logic 管理页
+          </a>
         </section>
       </div>
     `
@@ -848,6 +716,10 @@ export class DemoApp extends SignalWatcher(LitElement) {
     }
 
     .btn-secondary {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      text-decoration: none;
       padding: 10px 16px;
       border-radius: var(--demo-radius-md);
       border: 1px solid var(--demo-border);
@@ -868,6 +740,11 @@ export class DemoApp extends SignalWatcher(LitElement) {
     .btn-secondary:disabled {
       opacity: 0.55;
       cursor: not-allowed;
+    }
+
+    .nav-ontology {
+      margin-top: var(--demo-space-3);
+      width: 100%;
     }
 
     .ontology-textarea {

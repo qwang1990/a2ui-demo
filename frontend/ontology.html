@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>本体与 AIP Logic 管理</title>
+    <link rel="stylesheet" href="./src/index.css" />
+    <style>
+      /* 本体页：让编排区占满视口，画布可用高度由 flex 分配 */
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+      }
+      body {
+        display: flex;
+        flex-direction: column;
+        min-height: 100dvh;
+      }
+      ontology-app {
+        flex: 1 1 auto;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+      }
+    </style>
+    <script type="module" src="/src/ontology-studio.ts"></script>
+  </head>
+  <body>
+    <ontology-app></ontology-app>
+  </body>
+</html>

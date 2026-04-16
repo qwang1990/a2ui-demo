@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import hashlib
+import json
 from typing import Any, Callable
 
 from langgraph.checkpoint.memory import MemorySaver
@@ -16,7 +18,14 @@ from a2ui_demo.logging_utils import (
 )
 from a2ui_demo.ontology_client import OntologyPlatformClient, interpolate_request_path
 from a2ui_demo.ontology_models import LogicDefinition, OntologyNode, OntologySpec
-from a2ui_demo.ontology_validation import OntologyValidationError, validate_ontology_semantics
+from a2ui_demo.ontology_validation import (
+    OntologyValidationError,
+    coerce_attrs_for_properties,
+    expand_incomplete_graph_nodes,
+    summarize_property_constraints,
+    validate_ontology_semantics,
+    validate_user_attrs,
+)
 
 log = logging.getLogger(__name__)
 
@@ -26,6 +35,8 @@ class CompiledFlow:
         self.spec = spec
         self.graph = graph
         self.entry = spec.aip_logic.entry
+        raw = json.dumps(spec.model_dump(mode="json", by_alias=True), sort_keys=True, ensure_ascii=False)
+        self.ontology_revision = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
 def ensure_compilable(spec: OntologySpec) -> None:
@@ -34,28 +45,81 @@ def ensure_compilable(spec: OntologySpec) -> None:
         raise OntologyValidationError(errs)
 
 
-def _evaluate_logic(
+def _materialized_nodes(spec: OntologySpec) -> list[OntologyNode]:
+    return expand_incomplete_graph_nodes(spec)
+
+
+def _template_attrs_for_node(node: OntologyNode, attrs: dict[str, Any]) -> dict[str, Any]:
+    """HTTP 路径模板与 logic 表达式共用上下文：可将 attrs[fromAttr] 映射到模板占位符 templateKey。"""
+    if not node.logic_parameter_bindings:
+        return attrs
+    out = dict(attrs)
+    for b in node.logic_parameter_bindings:
+        if b.from_attr in attrs:
+            out[b.template_key] = attrs[b.from_attr]
+    return out
+
+
+def evaluate_expression(expression: str, attrs: dict[str, Any]) -> bool:
+    """Evaluate a simple boolean expression against attrs.
+
+    Supports:  attrs.key == value, !=, >, >=, <, <=, &&, ||, !
+    Values:    true, false, numeric literals, "string" literals, unquoted treated as string.
+    """
+    if not expression or not expression.strip():
+        return False
+    expr = expression.strip()
+    expr = expr.replace("&&", " and ").replace("||", " or ").replace("!", " not ")
+    import re
+    expr = re.sub(r"attrs\.(\w+)", lambda m: repr(attrs.get(m.group(1))), expr)
+    expr = re.sub(r"\btrue\b", "True", expr)
+    expr = re.sub(r"\bfalse\b", "False", expr)
+    try:
+        return bool(eval(expr, {"__builtins__": {}}, {}))  # noqa: S307
+    except Exception as exc:
+        log.warning("expression eval failed expr=%r error=%s", expression, exc)
+        return False
+
+
+def _evaluate_logic_result(
     state: FlowState,
     node: OntologyNode,
     client: OntologyPlatformClient,
     logic_by_api: dict[str, LogicDefinition],
-) -> bool:
+) -> tuple[bool, dict[str, Any]]:
+    """表达式优先；否则按 logicRef 调 mock HTTP，返回 (分支布尔, 完整 payload 供 responseToAttrs 合并)。"""
+    attrs = state.get("attrs") or {}
+    template_attrs = _template_attrs_for_node(node, attrs)
+    if node.expression:
+        return evaluate_expression(node.expression, attrs), {}
     ref = node.logic_ref or ""
     ld = logic_by_api.get(ref)
     if not ld:
         log.debug("logic node=%s missing definition for logicRef=%s", node.id, ref)
-        return False
+        return False, {}
     impl = ld.implementation
     if impl.type != "mock_user_flags":
         log.warning("logic node=%s unsupported implementation type=%s", node.id, impl.type)
-        return False
-    attrs = state.get("attrs") or {}
-    path, missing = interpolate_request_path(impl.request_path_template, attrs)
+        return False, {}
+    path, missing = interpolate_request_path(impl.request_path_template, template_attrs)
     if path is None:
         log.debug("logic node=%s: missing attrs for request path: %s", node.id, missing)
-        return False
-    data = client.get_json(path)
-    return bool(data.get(impl.flag_key))
+        return False, {}
+    try:
+        payload = client.get_json(path)
+    except Exception:
+        # POC: mock endpoint 不可用时回退为确定性规则，避免流程中断。
+        id_number = str(template_attrs.get("idNumber") or "")
+        user_id = str(template_attrs.get("userId") or f"U_{id_number.upper()}")
+        payload = {
+            "found": bool(str(template_attrs.get("fullName") or "").strip() and id_number.strip()),
+            "userId": user_id,
+            "has_ms_credit_card": "HAS_MS" in id_number.upper() or user_id.upper().endswith("MS"),
+            "is_sams_member": "SAMS_MEMBER" in id_number.upper() or user_id.upper().endswith("SAMS"),
+        }
+    if not isinstance(payload, dict):
+        payload = {}
+    return bool(payload.get(impl.flag_key)), payload
 
 
 def _logic_router(state: FlowState) -> str:
@@ -69,16 +133,24 @@ def _make_logic_node(
     logic_by_api: dict[str, LogicDefinition],
 ) -> Callable[[FlowState], dict[str, Any]]:
     def logic_node(state: FlowState) -> dict[str, Any]:
-        value = _evaluate_logic(state, node, client, logic_by_api)
-        branch = "true" if value else "false"
+        attrs = dict(state.get("attrs") or {})
+        ok, payload = _evaluate_logic_result(state, node, client, logic_by_api)
+        merged = {**attrs}
+        keys = list(node.response_to_attrs or [])
+        if payload and keys:
+            for k in keys:
+                if k in payload:
+                    merged[k] = payload[k]
+        branch = "true" if ok else "false"
         log.info("logic node=%s logicRef=%s branch=%s", node.id, node.logic_ref, branch)
-        return {"_branch": branch, "current_node_id": node.id}
+        return {"attrs": merged, "_branch": branch, "current_node_id": node.id}
 
     return logic_node
 
 
 def _make_collect_node(
     node: OntologyNode,
+    spec: OntologySpec,
     labels: dict[str, str],
     display_property_names: list[str],
 ) -> Callable[[FlowState], dict[str, Any]]:
@@ -86,10 +158,45 @@ def _make_collect_node(
     collect_field_names = list(node.property_api_names or [])
 
     def collect_node(state: FlowState) -> dict[str, Any]:
-        attrs = dict(state.get("attrs") or {})
-        missing = [k for k in collect_field_names if not str(attrs.get(k, "")).strip()]
-        if missing:
-            log.info("collect node=%s missing=%s objectType=%s", node.id, missing, node.object_type_api_name)
+        constraints = summarize_property_constraints(
+            spec,
+            object_type_api_name=node.object_type_api_name,
+            property_api_names=display_property_names,
+        )
+        merged = dict(state.get("attrs") or {})
+        while True:
+            merged = coerce_attrs_for_properties(
+                spec,
+                merged,
+                object_type_api_name=node.object_type_api_name,
+                property_api_names=display_property_names,
+            )
+            validation_errors = validate_user_attrs(
+                spec,
+                merged,
+                object_type_api_name=node.object_type_api_name,
+                property_api_names=collect_field_names,
+                require_all=True,
+            )
+            missing = [
+                k
+                for k in collect_field_names
+                if any(
+                    e.get("path") == k
+                    and (merged.get(k) is None or (isinstance(merged.get(k), str) and not merged.get(k).strip()))
+                    for e in validation_errors
+                )
+            ]
+            if not validation_errors:
+                log.info("collect node=%s satisfied all properties", node.id)
+                return {"attrs": merged, "current_node_id": node.id}
+            log.info(
+                "collect node=%s missing=%s validation_errors=%s objectType=%s",
+                node.id,
+                missing,
+                validation_errors,
+                node.object_type_api_name,
+            )
             resume = interrupt(
                 {
                     "kind": "user_input",
@@ -99,15 +206,14 @@ def _make_collect_node(
                     "property_api_names": display_property_names,
                     "collect_field_names": collect_field_names,
                     "title": node.title or "请补全信息",
-                    "attrs": dict(attrs),
+                    "attrs": dict(merged),
                     "objectTypeApiName": node.object_type_api_name,
+                    "constraints": constraints,
+                    "validationErrors": validation_errors,
                 }
             )
             payload = resume if isinstance(resume, dict) else {}
-            merged = {**attrs, **(payload.get("attrs") or {})}
-            return {"attrs": merged, "current_node_id": node.id}
-        log.info("collect node=%s satisfied all properties", node.id)
-        return {"current_node_id": node.id}
+            merged = {**merged, **(payload.get("attrs") or {})}
 
     return collect_node
 
@@ -158,7 +264,8 @@ def compile_flow(spec: OntologySpec, client: OntologyPlatformClient) -> Compiled
     logic_by_api = spec.logic_by_api_name()
     builder = StateGraph(FlowState)
 
-    for node in spec.nodes:
+    nodes = _materialized_nodes(spec)
+    for node in nodes:
         if node.kind == "logic":
             builder.add_node(node.id, _make_logic_node(node, client, logic_by_api))
         elif node.kind == "collect":
@@ -167,7 +274,7 @@ def compile_flow(spec: OntologySpec, client: OntologyPlatformClient) -> Compiled
             display = spec.property_names_for_object_type(node.object_type_api_name)
             if not display:
                 display = list(node.property_api_names or [])
-            builder.add_node(node.id, _make_collect_node(node, labels, display))
+            builder.add_node(node.id, _make_collect_node(node, spec, labels, display))
         elif node.kind == "action":
             builder.add_node(node.id, _make_action_node(node, spec))
         elif node.kind == "terminal":
@@ -178,7 +285,7 @@ def compile_flow(spec: OntologySpec, client: OntologyPlatformClient) -> Compiled
     entry = spec.aip_logic.entry
     builder.add_edge(START, entry)
 
-    for node in spec.nodes:
+    for node in nodes:
         if node.kind == "logic":
             edges = node.edges
             if not edges:
@@ -204,7 +311,7 @@ def compile_flow(spec: OntologySpec, client: OntologyPlatformClient) -> Compiled
         "compiled flow id=%s entry=%s spec_nodes=%d langgraph_nodes=%d langgraph_edges=%d langgraph_edges_preview=%s",
         spec.aip_logic.id,
         entry,
-        len(spec.nodes),
+        len(nodes),
         len(summary["nodes"]),
         len(summary["edges"]),
         compiled_graph_edges_summary(summary["edges"]),

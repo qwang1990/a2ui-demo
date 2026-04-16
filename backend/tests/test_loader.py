@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from a2ui_demo.config import ontology_dir
 from a2ui_demo.flows.loader import FlowRegistry, load_all_json
 from a2ui_demo.ontology_client import OntologyPlatformClient
+from a2ui_demo.ontology_split import merged_raw_for_api
 
 
 class FakeOntologyClient(OntologyPlatformClient):
@@ -25,13 +27,14 @@ class FakeOntologyClient(OntologyPlatformClient):
 
 
 def test_load_all_json(tmp_path: Path) -> None:
-    src = Path(__file__).resolve().parents[2] / "ontology" / "simple_kyc.json"
-    dst = tmp_path / "simple_kyc.json"
-    dst.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+    raw = merged_raw_for_api(ontology_dir(), "sam_credit_card")
+    assert raw is not None
+    dst = tmp_path / "sam_credit_card.json"
+    dst.write_text(raw, encoding="utf-8")
     reg = FlowRegistry(FakeOntologyClient())
     n = load_all_json(tmp_path, reg)
     assert n == 1
-    assert reg.get("simple_kyc") is not None
+    assert reg.get("sam_credit_card") is not None
 
 
 def test_registry_reload_single_file(tmp_path: Path) -> None:
@@ -65,3 +68,37 @@ def test_registry_reload_single_file(tmp_path: Path) -> None:
     reg = FlowRegistry(FakeOntologyClient())
     assert reg.load_file(p) is not None
     assert reg.get("hot_reload_x") is not None
+
+
+def test_registry_load_file_with_aip_logic_graph(tmp_path: Path) -> None:
+    p = tmp_path / "graph_flow.json"
+    p.write_text(
+        json.dumps(
+            {
+                "ontologyVersion": 1,
+                "logicDefinitions": [],
+                "actionDefinitions": [],
+                "aip_logic": {"id": "graph_flow", "entry": "collect_1", "inputs": []},
+                "objectTypes": [{"apiName": "Applicant", "properties": [{"apiName": "name", "type": "string"}]}],
+                "nodes": [],
+                "aip_logic_graph": {
+                    "version": 1,
+                    "nodes": [
+                        {
+                            "id": "collect_1",
+                            "kind": "collect",
+                            "objectTypeApiName": "Applicant",
+                            "propertyApiNames": ["name"],
+                        },
+                        {"id": "terminal_1", "kind": "terminal", "outcome": "approved", "message": "ok"},
+                    ],
+                    "edges": [{"source": "collect_1", "target": "terminal_1", "condition": "next"}],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    reg = FlowRegistry(FakeOntologyClient())
+    flow = reg.load_file(p)
+    assert flow is not None
+    assert flow.spec.nodes[0].id == "collect_1"

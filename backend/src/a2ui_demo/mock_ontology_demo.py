@@ -18,7 +18,9 @@ MOCK_USER_FLAG_RULES: list[dict[str, str]] = [
 
 MOCK_ONTOLOGY_DEMO_SEEDS: dict[str, Any] = {
     "mockUserEndpoint": "/api/mock-ontology/user/{idNumber}",
-    "ruleSummary": "服务端将身份证号转为大写后做子串匹配；两标志均为 false 时可通过前两步 logic。",
+    "mockApplicantQueryEndpoint": "/api/mock-ontology/applicant/query/{fullName}/{idNumber}",
+    "mockUserFlagsByUserIdEndpoint": "/api/mock-ontology/user/{userId}/flags",
+    "ruleSummary": "开始采集姓名+身份证后，依次用 applicant/query 同源 Mock 判断「已持民生卡」「山姆会员」（均为 HTTP 分支，无单独查询节点）。",
     "flagRules": MOCK_USER_FLAG_RULES,
     "exampleProfiles": [
         {
@@ -28,13 +30,13 @@ MOCK_ONTOLOGY_DEMO_SEEDS: dict[str, Any] = {
             "expectedFlags": {"is_sams_member": False, "has_ms_credit_card": False},
         },
         {
-            "label": "山姆会员 → 第一步 logic 为 true → 不予开卡",
+            "label": "山姆会员 → 持民生卡为 false 后山姆 logic 为 true → 不予开卡",
             "fullName": "李四",
             "idNumber": "11010119900101SAMS_MEMBER234",
             "expectedFlags": {"is_sams_member": True, "has_ms_credit_card": False},
         },
         {
-            "label": "已持民生卡 → 第二步 logic 为 true → 不予开卡",
+            "label": "已持民生卡 → 首条 logic 为 true → 不予开卡",
             "fullName": "王五",
             "idNumber": "11010119900101HAS_MS234",
             "expectedFlags": {"is_sams_member": False, "has_ms_credit_card": True},

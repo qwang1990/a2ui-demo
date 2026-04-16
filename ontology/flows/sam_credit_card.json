@@ -1,0 +1,222 @@
+{
+  "schemaVersion": 1,
+  "tboxRef": "sam_credit",
+  "aboxRef": "sam_credit",
+  "aip_logic": {
+    "id": "sam_credit_card",
+    "entry": "start_apply",
+    "inputs": [
+      {
+        "attributeApiName": "fullName",
+        "required": true,
+        "description": "申请人姓名"
+      },
+      {
+        "attributeApiName": "idNumber",
+        "required": true,
+        "description": "身份证号（演示用 Mock 规则见 logicDefinitions）"
+      }
+    ],
+    "allowIncompleteGraph": false
+  },
+  "aip_logic_graph": {
+    "version": 1,
+    "nodes": [
+      {
+        "id": "start_apply",
+        "kind": "start",
+        "title": "开始办理",
+        "objectTypeApiName": "ApplicantUser",
+        "propertyApiNames": [],
+        "outcome": "approved",
+        "message": "",
+        "logicRef": "",
+        "actionRef": "",
+        "inputPropertyApiNames": [
+          "fullName",
+          "idNumber"
+        ],
+        "responseToAttrs": [],
+        "expression": "",
+        "position": {
+          "x": 120.0,
+          "y": 120.0
+        },
+        "logicParameterBindings": null
+      },
+      {
+        "id": "check_ms_card",
+        "kind": "logic",
+        "title": "判断是否已持民生信用卡",
+        "objectTypeApiName": "",
+        "propertyApiNames": [],
+        "outcome": "approved",
+        "message": "",
+        "logicRef": "has_ms_credit_card_by_user_id",
+        "actionRef": "",
+        "inputPropertyApiNames": [],
+        "responseToAttrs": [],
+        "expression": "",
+        "position": {
+          "x": 366.16015625,
+          "y": 31.56640625
+        },
+        "logicParameterBindings": [
+          {
+            "fromAttr": "fullName",
+            "templateKey": "fullName"
+          },
+          {
+            "fromAttr": "idNumber",
+            "templateKey": "idNumber"
+          }
+        ]
+      },
+      {
+        "id": "check_sams_member",
+        "kind": "logic",
+        "title": "判断是否山姆会员",
+        "objectTypeApiName": "",
+        "propertyApiNames": [],
+        "outcome": "approved",
+        "message": "",
+        "logicRef": "is_sams_member_by_identity",
+        "actionRef": "",
+        "inputPropertyApiNames": [],
+        "responseToAttrs": [],
+        "expression": "",
+        "position": {
+          "x": 486.8359375,
+          "y": 205.62109375
+        },
+        "logicParameterBindings": [
+          {
+            "fromAttr": "fullName",
+            "templateKey": "fullName"
+          },
+          {
+            "fromAttr": "idNumber",
+            "templateKey": "idNumber"
+          }
+        ]
+      },
+      {
+        "id": "collect_detail",
+        "kind": "collect",
+        "title": "补充手机号、年龄与住址",
+        "objectTypeApiName": "ApplicantUser",
+        "propertyApiNames": [
+          "phone",
+          "age",
+          "address"
+        ],
+        "outcome": "approved",
+        "message": "",
+        "logicRef": "",
+        "actionRef": "",
+        "inputPropertyApiNames": [],
+        "responseToAttrs": [],
+        "expression": "",
+        "position": {
+          "x": 760.0,
+          "y": 220.0
+        },
+        "logicParameterBindings": null
+      },
+      {
+        "id": "face_verify",
+        "kind": "action",
+        "title": "人脸识别核验",
+        "objectTypeApiName": "",
+        "propertyApiNames": [],
+        "outcome": "approved",
+        "message": "",
+        "logicRef": "",
+        "actionRef": "face_verify",
+        "inputPropertyApiNames": [],
+        "responseToAttrs": [],
+        "expression": "",
+        "position": {
+          "x": 1090.0,
+          "y": 220.0
+        },
+        "logicParameterBindings": null
+      },
+      {
+        "id": "terminal_denied",
+        "kind": "end",
+        "title": "拒绝结束",
+        "objectTypeApiName": "",
+        "propertyApiNames": [],
+        "outcome": "denied",
+        "message": "不予开卡",
+        "logicRef": "",
+        "actionRef": "",
+        "inputPropertyApiNames": [],
+        "responseToAttrs": [],
+        "expression": "",
+        "position": {
+          "x": 760.0,
+          "y": 40.0
+        },
+        "logicParameterBindings": null
+      },
+      {
+        "id": "terminal_approved",
+        "kind": "end",
+        "title": "通过结束",
+        "objectTypeApiName": "",
+        "propertyApiNames": [],
+        "outcome": "approved",
+        "message": "提交验证",
+        "logicRef": "",
+        "actionRef": "",
+        "inputPropertyApiNames": [],
+        "responseToAttrs": [],
+        "expression": "",
+        "position": {
+          "x": 1390.0,
+          "y": 220.0
+        },
+        "logicParameterBindings": null
+      }
+    ],
+    "edges": [
+      {
+        "source": "start_apply",
+        "target": "check_ms_card",
+        "condition": "next"
+      },
+      {
+        "source": "check_sams_member",
+        "target": "terminal_denied",
+        "condition": "true"
+      },
+      {
+        "source": "check_sams_member",
+        "target": "collect_detail",
+        "condition": "false"
+      },
+      {
+        "source": "collect_detail",
+        "target": "face_verify",
+        "condition": "next"
+      },
+      {
+        "source": "face_verify",
+        "target": "terminal_approved",
+        "condition": "next"
+      },
+      {
+        "source": "check_ms_card",
+        "target": "check_sams_member",
+        "condition": "true"
+      },
+      {
+        "source": "check_ms_card",
+        "target": "terminal_denied",
+        "condition": "false"
+      }
+    ]
+  }
+}

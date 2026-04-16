@@ -4,11 +4,13 @@ import re
 from typing import Any, Literal
 
 A2uiMessagesSource = Literal[
+    "llm_intent_compiled",
     "llm_schema",
     "llm_a2ui_v08",
     "template_unknown",
     "template_non_user_input",
     "template_fallback",
+    "template_on_intent_error",
     "template_on_schema_error",
 ]
 
@@ -21,6 +23,9 @@ FallbackReason = Literal[
     "schema_validate_error",
     "schema_no_fields",
     "schema_to_messages_error",
+    "intent_validate_error",
+    "intent_no_fields",
+    "intent_to_messages_error",
     "union_parse_error",
     "union_output_kind_invalid",
     "a2ui_batch_validate_error",
@@ -81,16 +86,18 @@ def normalize_collect_schema(schema: dict[str, Any]) -> tuple[dict[str, Any], li
             input_type = "shortText"
 
         placeholder = str(item.get("placeholder") or "").strip() or None
-        normalized_fields.append(
-            {
-                "fieldId": field_id,
-                "label": label,
-                "path": path,
-                "inputType": input_type,
-                "required": bool(item.get("required", True)),
-                "placeholder": placeholder,
-            }
-        )
+        field_error = str(item.get("fieldError") or "").strip() or None
+        nf: dict[str, Any] = {
+            "fieldId": field_id,
+            "label": label,
+            "path": path,
+            "inputType": input_type,
+            "required": bool(item.get("required", True)),
+            "placeholder": placeholder,
+        }
+        if field_error:
+            nf["fieldError"] = field_error
+        normalized_fields.append(nf)
 
     out["fields"] = normalized_fields
     if "assistantText" in out and out["assistantText"] is not None:

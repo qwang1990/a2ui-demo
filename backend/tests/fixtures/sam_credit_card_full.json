@@ -1,0 +1,284 @@
+{
+  "ontologyVersion": 1,
+  "logicDefinitions": [
+    {
+      "apiName": "has_ms_credit_card_by_user_id",
+      "displayName": "是否已持民生银行信用卡（按姓名+身份证）",
+      "description": "Mock：与 applicant/query 同源，读响应中的 has_ms_credit_card。",
+      "implementation": {
+        "type": "mock_user_flags",
+        "flagKey": "has_ms_credit_card",
+        "requestPathTemplate": "/api/mock-ontology/applicant/query/{fullName}/{idNumber}"
+      }
+    },
+    {
+      "apiName": "is_sams_member_by_identity",
+      "displayName": "是否山姆会员（按姓名+身份证）",
+      "description": "根据 姓名+身份证 查询是否山姆会员。",
+      "implementation": {
+        "type": "mock_user_flags",
+        "flagKey": "is_sams_member",
+        "requestPathTemplate": "/api/mock-ontology/applicant/query/{fullName}/{idNumber}"
+      }
+    }
+  ],
+  "actionDefinitions": [
+    {
+      "apiName": "face_verify",
+      "displayName": "人脸识别",
+      "description": "活体/人脸核验（演示环境为确认即通过）。",
+      "implementationKey": "face_verify"
+    }
+  ],
+  "aip_logic": {
+    "id": "sam_credit_card",
+    "entry": "start_apply",
+    "inputs": [
+      {
+        "attributeApiName": "fullName",
+        "required": true,
+        "description": "申请人姓名"
+      },
+      {
+        "attributeApiName": "idNumber",
+        "required": true,
+        "description": "身份证号（演示用 Mock 规则见 logicDefinitions）"
+      }
+    ]
+  },
+  "aip_logic_graph": {
+    "version": 1,
+    "nodes": [
+      {
+        "id": "start_apply",
+        "kind": "start",
+        "title": "开始办理",
+        "objectTypeApiName": "ApplicantUser",
+        "inputPropertyApiNames": ["fullName", "idNumber"],
+        "position": { "x": 120, "y": 120 }
+      },
+      {
+        "id": "check_ms_card",
+        "kind": "logic",
+        "title": "判断是否已持民生信用卡",
+        "logicRef": "has_ms_credit_card_by_user_id",
+        "logicParameterBindings": [
+          { "fromAttr": "fullName", "templateKey": "fullName" },
+          { "fromAttr": "idNumber", "templateKey": "idNumber" }
+        ],
+        "position": { "x": 430, "y": 80 }
+      },
+      {
+        "id": "check_sams_member",
+        "kind": "logic",
+        "title": "判断是否山姆会员",
+        "logicRef": "is_sams_member_by_identity",
+        "logicParameterBindings": [
+          { "fromAttr": "fullName", "templateKey": "fullName" },
+          { "fromAttr": "idNumber", "templateKey": "idNumber" }
+        ],
+        "position": { "x": 430, "y": 220 }
+      },
+      {
+        "id": "collect_detail",
+        "kind": "collect",
+        "title": "补充手机号、年龄与住址",
+        "objectTypeApiName": "ApplicantUser",
+        "propertyApiNames": ["phone", "age", "address"],
+        "position": { "x": 1090, "y": 220 }
+      },
+      {
+        "id": "face_verify",
+        "kind": "action",
+        "title": "人脸识别核验",
+        "actionRef": "face_verify",
+        "position": { "x": 1390, "y": 220 }
+      },
+      {
+        "id": "terminal_denied",
+        "kind": "end",
+        "title": "拒绝结束",
+        "outcome": "denied",
+        "message": "不予开卡",
+        "position": { "x": 1090, "y": 40 }
+      },
+      {
+        "id": "terminal_approved",
+        "kind": "end",
+        "title": "通过结束",
+        "outcome": "approved",
+        "message": "提交验证",
+        "position": { "x": 1680, "y": 220 }
+      }
+    ],
+    "edges": [
+      { "source": "start_apply", "target": "check_ms_card", "condition": "next" },
+      { "source": "check_ms_card", "target": "terminal_denied", "condition": "true" },
+      { "source": "check_ms_card", "target": "check_sams_member", "condition": "false" },
+      { "source": "check_sams_member", "target": "terminal_denied", "condition": "true" },
+      { "source": "check_sams_member", "target": "collect_detail", "condition": "false" },
+      { "source": "collect_detail", "target": "face_verify", "condition": "next" },
+      { "source": "face_verify", "target": "terminal_approved", "condition": "next" }
+    ]
+  },
+  "objectTypes": [
+    {
+      "apiName": "ApplicantUser",
+      "displayName": "申请人（用户）",
+      "description": "信用卡开卡场景下的自然人主体",
+      "properties": [
+        {
+          "apiName": "fullName",
+          "type": "string",
+          "displayName": "姓名",
+          "description": null,
+          "required": true,
+          "fieldSource": "user_input"
+        },
+        {
+          "apiName": "idNumber",
+          "type": "string",
+          "displayName": "身份证号",
+          "description": null,
+          "required": true,
+          "fieldSource": "user_input"
+        },
+        {
+          "apiName": "phone",
+          "type": "string",
+          "displayName": "手机号",
+          "description": null,
+          "required": false,
+          "fieldSource": "user_input",
+          "constraints": {
+            "format": "cn_phone_11",
+            "minLength": 11,
+            "maxLength": 11,
+            "message": "手机号必须为11位数字"
+          }
+        },
+        {
+          "apiName": "address",
+          "type": "string",
+          "displayName": "家庭住址",
+          "description": null,
+          "required": false,
+          "fieldSource": "user_input"
+        },
+        {
+          "apiName": "userId",
+          "type": "string",
+          "displayName": "用户ID",
+          "description": "对象查询后写回的系统用户ID",
+          "required": false,
+          "fieldSource": "ontology_api"
+        },
+        {
+          "apiName": "age",
+          "type": "integer",
+          "displayName": "年龄",
+          "description": null,
+          "required": false,
+          "fieldSource": "user_input",
+          "constraints": {
+            "minimum": 18,
+            "maximum": 120
+          }
+        }
+      ]
+    }
+  ],
+  "nodes": [
+    {
+      "id": "start_apply",
+      "kind": "collect",
+      "edges": null,
+      "next": "check_ms_card",
+      "objectTypeApiName": "ApplicantUser",
+      "propertyApiNames": ["fullName", "idNumber"],
+      "title": "开始办理",
+      "outcome": null,
+      "message": null,
+      "logicRef": null,
+      "actionRef": null
+    },
+    {
+      "id": "check_ms_card",
+      "kind": "logic",
+      "edges": { "true": "terminal_denied", "false": "check_sams_member" },
+      "next": null,
+      "objectTypeApiName": null,
+      "propertyApiNames": null,
+      "title": "判断是否已持民生信用卡",
+      "outcome": null,
+      "message": null,
+      "logicRef": "has_ms_credit_card_by_user_id",
+      "actionRef": null
+    },
+    {
+      "id": "check_sams_member",
+      "kind": "logic",
+      "edges": { "true": "terminal_denied", "false": "collect_detail" },
+      "next": null,
+      "objectTypeApiName": null,
+      "propertyApiNames": null,
+      "title": "判断是否山姆会员",
+      "outcome": null,
+      "message": null,
+      "logicRef": "is_sams_member_by_identity",
+      "actionRef": null
+    },
+    {
+      "id": "collect_detail",
+      "kind": "collect",
+      "edges": null,
+      "next": "face_verify",
+      "objectTypeApiName": "ApplicantUser",
+      "propertyApiNames": ["phone", "age", "address"],
+      "title": "补充手机号、年龄与住址",
+      "outcome": null,
+      "message": null,
+      "logicRef": null,
+      "actionRef": null
+    },
+    {
+      "id": "face_verify",
+      "kind": "action",
+      "edges": null,
+      "next": "terminal_approved",
+      "objectTypeApiName": null,
+      "propertyApiNames": null,
+      "title": "人脸识别核验",
+      "outcome": null,
+      "message": null,
+      "logicRef": null,
+      "actionRef": "face_verify"
+    },
+    {
+      "id": "terminal_denied",
+      "kind": "terminal",
+      "edges": null,
+      "next": null,
+      "objectTypeApiName": null,
+      "propertyApiNames": null,
+      "title": null,
+      "outcome": "denied",
+      "message": "不予开卡",
+      "logicRef": null,
+      "actionRef": null
+    },
+    {
+      "id": "terminal_approved",
+      "kind": "terminal",
+      "edges": null,
+      "next": null,
+      "objectTypeApiName": null,
+      "propertyApiNames": null,
+      "title": null,
+      "outcome": "approved",
+      "message": "提交验证",
+      "logicRef": null,
+      "actionRef": null
+    }
+  ]
+}
